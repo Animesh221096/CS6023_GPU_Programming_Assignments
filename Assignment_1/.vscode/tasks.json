@@ -1,0 +1,102 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build-debug-pipeline",
+      "type": "shell",
+      "command": "nvcc",
+      "args": [
+        "-O0",
+        "-g",
+        "-std=c++11",
+        "-lineinfo",
+        "-Xcompiler",
+        "-Wall",
+        "pipeline.cu",
+        "-o",
+        "pipeline"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$nvcc"],
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "build-debug-pipeline-interactive",
+      "type": "shell",
+      "command": "nvcc",
+      "args": [
+        "-O0",
+        "-g",
+        "-std=c++11",
+        "-lineinfo",
+        "-Xcompiler",
+        "-Wall",
+        "pipeline.cu",
+        "-o",
+        "pipeline"
+      ],
+      "group": {
+        "kind": "build"
+      },
+      "problemMatcher": ["$nvcc"]
+    },
+    {
+      "label": "build-debug-input02",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-c",
+        "nvcc -O0 -g -std=c++11 -lineinfo -Xcompiler -Wall pipeline.cu -o pipeline && echo 'Built successfully'"
+      ],
+      "group": {
+        "kind": "build"
+      },
+      "problemMatcher": ["$nvcc"]
+    },
+    {
+      "label": "build-debug-input03",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-c",
+        "nvcc -O0 -g -std=c++11 -lineinfo -Xcompiler -Wall pipeline.cu -o pipeline && echo 'Built successfully'"
+      ],
+      "group": {
+        "kind": "build"
+      },
+      "problemMatcher": ["$nvcc"]
+    },
+    {
+      "label": "run-all-tests",
+      "type": "shell",
+      "command": "bash",
+      "args": ["run_tests.sh"],
+      "group": {
+        "kind": "test"
+      },
+      "presentation": {
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "run-single-test",
+      "type": "shell",
+      "command": "bash",
+      "args": ["compile.sh", "pipeline.cu", "testcases/public/input_01.txt"],
+      "group": {
+        "kind": "test"
+      },
+      "presentation": {
+        "reveal": "always"
+      }
+    }
+  ]
+}

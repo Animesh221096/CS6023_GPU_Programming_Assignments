@@ -1,0 +1,86 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Pipeline (test input_01)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/pipeline",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": true,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "build-debug-pipeline",
+      "sourceLanguages": ["cuda", "cpp"]
+    },
+    {
+      "name": "Debug Pipeline (stdin interactive)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/pipeline",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": true,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "build-debug-pipeline-interactive"
+    },
+    {
+      "name": "Debug with input_02",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/pipeline",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": true,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "build-debug-input02"
+    },
+    {
+      "name": "Debug with input_03",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/pipeline",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": true,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "build-debug-input03"
+    }
+  ]
+}
