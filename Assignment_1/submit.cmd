@@ -8,13 +8,16 @@
 #  Aqua job script for GPU Assignment 1.
 #
 #  This version copies your work to scratch, RUNS THERE, and copies only the
-#  results back -- it never tries to move the inputs back onto themselves.
+#  results back with job ID and timestamped filenames.
 # ---------------------------------------------------------------------------
 
 tpdir=`echo $PBS_JOBID | cut -f 1 -d .`
 tempdir=$HOME/scratch/job$tpdir
 mkdir -p $tempdir
 cd $tempdir
+
+# Generate timestamp for output files
+timestamp=$(date +"%Y%m%d_%H%M%S")
 
 cp -R $PBS_O_WORKDIR/* .
 
@@ -26,8 +29,9 @@ chmod +x run_tests.sh compile.sh 2>/dev/null
 
 ./run_tests.sh
 
-cp -f logfile.log  $PBS_O_WORKDIR/ 2>/dev/null
-cp -f errorfile.err $PBS_O_WORKDIR/ 2>/dev/null
+# Copy files back with job ID and timestamped names
+cp -f logfile.log  $PBS_O_WORKDIR/logfile_${tpdir}_${timestamp}.log 2>/dev/null
+cp -f errorfile.err $PBS_O_WORKDIR/errorfile_${tpdir}_${timestamp}.err 2>/dev/null
 
 cd $HOME
 rm -rf $tempdir
