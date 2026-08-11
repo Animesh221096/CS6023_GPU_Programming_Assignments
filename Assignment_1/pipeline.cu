@@ -305,11 +305,11 @@ int main(int argc, char **argv)
     //
     // Allocate all five buffers above with cudaMalloc.
 
-    cudaMalloc((void **)&d_rgb, H * W * 3 * sizeof(unsigned char));
-    cudaMalloc((void **)&d_gray, H * W * sizeof(float));
-    cudaMalloc((void **)&d_resized, Hr * Wr * sizeof(float));
-    cudaMalloc((void **)&d_cropped, Hc * Wc * sizeof(float));
-    cudaMalloc((void **)&d_out, Hc * Wc * sizeof(float));
+    cudaMalloc((void **)&d_rgb, nRgb * sizeof(unsigned char));
+    cudaMalloc((void **)&d_gray, nPixIn * sizeof(float));
+    cudaMalloc((void **)&d_resized, nPixRes * sizeof(float));
+    cudaMalloc((void **)&d_cropped, nPixCrop * sizeof(float));
+    cudaMalloc((void **)&d_out, nPixCrop * sizeof(float));
 
     // ==== END TODO 5 ====
 
@@ -317,7 +317,7 @@ int main(int argc, char **argv)
     //
     // Copy h_rgb (nRgb bytes) into d_rgb
 
-    cudaMemcpy(d_rgb, h_rgb, H * W * 3 * sizeof(unsigned char), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_rgb, h_rgb, nRgb * sizeof(unsigned char), cudaMemcpyHostToDevice);
 
     // ==== END TODO 6 ====
 
@@ -334,53 +334,53 @@ int main(int argc, char **argv)
     grayscaleKernel<<<NUM_BLOCKS_Gray, BLOCK_SIZE>>>(d_rgb, d_gray, H, W);
 
     float *h_gray = (float *)malloc(nRgb * sizeof(float));
-    cudaMemcpy(h_gray, d_gray, H * W * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_gray, d_gray, nPixIn * sizeof(float), cudaMemcpyDeviceToHost);
 
-    printf("h_gray, %d %d\n", H, W);
-    for (int y = 0; y < H; ++y)
-    {
-        for (int x = 0; x < W; ++x)
-        {
-            printf("%.6f%c", h_gray[(size_t)y * (size_t)W + (size_t)x],
-                   (x == W - 1) ? '\n' : ' ');
-        }
-    }
+    // printf("h_gray, %d %d\n", H, W);
+    // for (int y = 0; y < H; ++y)
+    // {
+    //     for (int x = 0; x < W; ++x)
+    //     {
+    //         printf("%.6f%c", h_gray[(size_t)y * (size_t)W + (size_t)x],
+    //                (x == W - 1) ? '\n' : ' ');
+    //     }
+    // }
 
 
 
     int NUM_BLOCKS_Resize = CEIL_DIV(Hr * Wr, BLOCK_SIZE);
     resizeKernel<<<NUM_BLOCKS_Resize, BLOCK_SIZE>>>(d_gray, d_resized, H, W, Hr, Wr);
 
-    float *h_resized = (float *)malloc(Hr * Wr * sizeof(float));
-    cudaMemcpy(h_resized, d_resized, Hr * Wr * sizeof(float), cudaMemcpyDeviceToHost);
+    float *h_resized = (float *)malloc(nPixRes * sizeof(float));
+    cudaMemcpy(h_resized, d_resized, nPixRes * sizeof(float), cudaMemcpyDeviceToHost);
 
-    printf("h_resized, %d %d\n", Hr, Wr);
-    for (int y = 0; y < Hr; ++y)
-    {
-        for (int x = 0; x < Wr; ++x)
-        {
-            printf("%.6f%c", h_resized[(size_t)y * (size_t)Wr + (size_t)x],
-                   (x == Wr - 1) ? '\n' : ' ');
-        }
-    }
+    // printf("h_resized, %d %d\n", Hr, Wr);
+    // for (int y = 0; y < Hr; ++y)
+    // {
+    //     for (int x = 0; x < Wr; ++x)
+    //     {
+    //         printf("%.6f%c", h_resized[(size_t)y * (size_t)Wr + (size_t)x],
+    //                (x == Wr - 1) ? '\n' : ' ');
+    //     }
+    // }
 
 
 
     int NUM_BLOCKS_cropped = CEIL_DIV(Hc * Wc, BLOCK_SIZE);
     cropKernel<<<NUM_BLOCKS_cropped, BLOCK_SIZE>>>(d_resized, d_cropped, Hr, Wr, Hc, Wc);
 
-    float *h_cropped = (float *)malloc(Hc * Wc * sizeof(float));
-    cudaMemcpy(h_cropped, d_cropped, Hc * Wc * sizeof(float), cudaMemcpyDeviceToHost);
+    float *h_cropped = (float *)malloc(nPixCrop * sizeof(float));
+    cudaMemcpy(h_cropped, d_cropped, nPixCrop * sizeof(float), cudaMemcpyDeviceToHost);
 
-    printf("h_cropped, %d %d\n", Hc, Wc);
-    for (int y = 0; y < Hc; ++y)
-    {
-        for (int x = 0; x < Wc; ++x)
-        {
-            printf("%.6f%c", h_cropped[(size_t)y * (size_t)Wc + (size_t)x],
-                   (x == Wc - 1) ? '\n' : ' ');
-        }
-    }
+    // printf("h_cropped, %d %d\n", Hc, Wc);
+    // for (int y = 0; y < Hc; ++y)
+    // {
+    //     for (int x = 0; x < Wc; ++x)
+    //     {
+    //         printf("%.6f%c", h_cropped[(size_t)y * (size_t)Wc + (size_t)x],
+    //                (x == Wc - 1) ? '\n' : ' ');
+    //     }
+    // }
 
 
     
@@ -394,7 +394,7 @@ int main(int argc, char **argv)
     //
     // Copy nPixCrop floats from d_out into h_out.
 
-    cudaMemcpy(h_out, d_out, Hc * Wc * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out, d_out, nPixCrop * sizeof(float), cudaMemcpyDeviceToHost);
 
     // ==== END TODO 8 ====
 
