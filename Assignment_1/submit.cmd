@@ -27,7 +27,9 @@ module load python385
 
 chmod +x run_tests.sh compile.sh 2>/dev/null
 
-./run_tests.sh
+# ./run_tests.sh
+
+./run_tests.sh -s CS26M004.cu
 
 # Copy files back with job ID and timestamped names
 cp -f logfile.log  $PBS_O_WORKDIR/logfile_${tpdir}_${timestamp}.log 2>/dev/null
