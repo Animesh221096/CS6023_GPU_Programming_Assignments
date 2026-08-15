@@ -333,9 +333,8 @@ int main(int argc, char **argv)
     int NUM_BLOCKS_Gray = CEIL_DIV(H * W, BLOCK_SIZE);
     grayscaleKernel<<<NUM_BLOCKS_Gray, BLOCK_SIZE>>>(d_rgb, d_gray, H, W);
 
-    float *h_gray = (float *)malloc(nRgb * sizeof(float));
-    cudaMemcpy(h_gray, d_gray, nPixIn * sizeof(float), cudaMemcpyDeviceToHost);
-
+    // float *h_gray = (float *)malloc(nRgb * sizeof(float));
+    // cudaMemcpy(h_gray, d_gray, nPixIn * sizeof(float), cudaMemcpyDeviceToHost);
     // printf("h_gray, %d %d\n", H, W);
     // for (int y = 0; y < H; ++y)
     // {
@@ -351,9 +350,8 @@ int main(int argc, char **argv)
     int NUM_BLOCKS_Resize = CEIL_DIV(Hr * Wr, BLOCK_SIZE);
     resizeKernel<<<NUM_BLOCKS_Resize, BLOCK_SIZE>>>(d_gray, d_resized, H, W, Hr, Wr);
 
-    float *h_resized = (float *)malloc(nPixRes * sizeof(float));
-    cudaMemcpy(h_resized, d_resized, nPixRes * sizeof(float), cudaMemcpyDeviceToHost);
-
+    // float *h_resized = (float *)malloc(nPixRes * sizeof(float));
+    // cudaMemcpy(h_resized, d_resized, nPixRes * sizeof(float), cudaMemcpyDeviceToHost);
     // printf("h_resized, %d %d\n", Hr, Wr);
     // for (int y = 0; y < Hr; ++y)
     // {
@@ -369,9 +367,8 @@ int main(int argc, char **argv)
     int NUM_BLOCKS_cropped = CEIL_DIV(Hc * Wc, BLOCK_SIZE);
     cropKernel<<<NUM_BLOCKS_cropped, BLOCK_SIZE>>>(d_resized, d_cropped, Hr, Wr, Hc, Wc);
 
-    float *h_cropped = (float *)malloc(nPixCrop * sizeof(float));
-    cudaMemcpy(h_cropped, d_cropped, nPixCrop * sizeof(float), cudaMemcpyDeviceToHost);
-
+    // float *h_cropped = (float *)malloc(nPixCrop * sizeof(float));
+    // cudaMemcpy(h_cropped, d_cropped, nPixCrop * sizeof(float), cudaMemcpyDeviceToHost);
     // printf("h_cropped, %d %d\n", Hc, Wc);
     // for (int y = 0; y < Hc; ++y)
     // {
