@@ -6,6 +6,45 @@
 using namespace std;
 
 
+#define BLOCKSIZE_X 16
+#define BLOCKSIZE_Y BLOCKSIZE_X
+
+__global__ void Mat_mul_1(const int *X, const int *Y, int* Z, 
+                        const int p, const int q, const int r){
+    // X is A^T (p x q)
+    // Y is B (q x r)  
+    // Z is result (p x r)
+    
+    int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if(idx_x >= p || idx_y >= r){
+        return;
+    }
+    
+    for(int i = 0; i < q; i++){
+        Z[idx_x * r + idx_y] += X[i * p + idx_x] * Y[i * r + idx_y];
+    }
+}
+
+__global__ void Mat_mul_2(const int *X, const int *Y, int* Z, 
+                        const int p, const int q, const int r){
+    
+    int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if(idx_x >= p || idx_y >= r){
+        return;
+    }
+    
+    for(int i = 0; i < q; i++){
+        Z[idx_x * r + idx_y] += X[idx_x * q + i] * Y[idx_y * q + i];
+    }
+}
+
+
+
+
 // function to compute the output matrix
 void compute(int p, int q, int r, int *h_matrixA, int *h_matrixB,
 	         int *h_matrixC, int *h_matrixD, int *h_matrixE){
@@ -25,9 +64,18 @@ void compute(int p, int q, int r, int *h_matrixA, int *h_matrixB,
 	cudaMemcpy(d_matrixC, h_matrixC, p * q * sizeof(int), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_matrixD, h_matrixD, r * q * sizeof(int), cudaMemcpyHostToDevice);
 
-	/* ****************************************************************** */
-	/* Write your code here */
-	/* Configure and launch kernels */
+		/* ****************************************************************** */
+		/* Write your code here */
+		/* Configure and launch kernels */
+
+		cudaMemset(d_matrixE, 0, p * r * sizeof(int));
+
+		dim3 blockSize(BLOCKSIZE_X, BLOCKSIZE_Y);
+		dim3 gridSize((p + BLOCKSIZE_X - 1) / BLOCKSIZE_Y, (r + BLOCKSIZE_Y - 1) / BLOCKSIZE_Y);
+
+		Mat_mul_1<<<gridSize, blockSize>>>(d_matrixA, d_matrixB, d_matrixE, p, q, r);
+		Mat_mul_2<<<gridSize, blockSize>>>(d_matrixC, d_matrixD, d_matrixE, p, q, r);
+	
 
 	/* ****************************************************************** */
 
