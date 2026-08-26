@@ -10,12 +10,29 @@ Where:
 - D: r×q matrix
 - E: p×r matrix (output)
 
-This script generates both near-maximum and highly rectangular test cases.
+This script APPENDS new test cases to existing ones.
 """
 
 import os
 import random
 import numpy as np
+
+def get_next_test_number(output_dir):
+    """Find the next available test case number."""
+    existing_files = os.listdir(output_dir)
+    if not existing_files:
+        return 1
+    
+    numbers = []
+    for filename in existing_files:
+        if filename.startswith("input") and filename.endswith(".txt"):
+            try:
+                num = int(filename.replace("input", "").replace(".txt", ""))
+                numbers.append(num)
+            except ValueError:
+                continue
+    
+    return max(numbers) + 1 if numbers else 1
 
 def generate_test_case(p, q, r, test_num, output_dir_input, output_dir_output):
     """
@@ -69,7 +86,7 @@ def generate_test_case(p, q, r, test_num, output_dir_input, output_dir_output):
     print(f"Generated test case {test_num}: p={p}, q={q}, r={r}")
     return A, B, C, D, E
 
-def generate_near_max_cases(output_dir_input, output_dir_output):
+def generate_near_max_cases(start_num, output_dir_input, output_dir_output):
     """Generate test cases with dimensions near maximum (1024)."""
     near_max_cases = [
         (1024, 1024, 1024),  # Maximum all dimensions
@@ -79,10 +96,14 @@ def generate_near_max_cases(output_dir_input, output_dir_output):
         (1024, 512, 1024),
     ]
     
-    for idx, (p, q, r) in enumerate(near_max_cases, 1):
-        generate_test_case(p, q, r, idx, output_dir_input, output_dir_output)
+    current_num = start_num
+    for p, q, r in near_max_cases:
+        generate_test_case(p, q, r, current_num, output_dir_input, output_dir_output)
+        current_num += 1
+    
+    return current_num
 
-def generate_rectangular_cases(output_dir_input, output_dir_output):
+def generate_rectangular_cases(start_num, output_dir_input, output_dir_output):
     """Generate highly rectangular (non-square) test cases."""
     rectangular_cases = [
         (2, 1024, 2),        # Very tall q dimension
@@ -93,10 +114,14 @@ def generate_rectangular_cases(output_dir_input, output_dir_output):
         (512, 100, 2),
     ]
     
-    for idx, (p, q, r) in enumerate(rectangular_cases, 6):
-        generate_test_case(p, q, r, idx, output_dir_input, output_dir_output)
+    current_num = start_num
+    for p, q, r in rectangular_cases:
+        generate_test_case(p, q, r, current_num, output_dir_input, output_dir_output)
+        current_num += 1
+    
+    return current_num
 
-def generate_small_test_cases(output_dir_input, output_dir_output):
+def generate_small_test_cases(start_num, output_dir_input, output_dir_output):
     """Generate small test cases for verification."""
     small_cases = [
         (2, 2, 2),      # Minimal size
@@ -104,8 +129,12 @@ def generate_small_test_cases(output_dir_input, output_dir_output):
         (5, 3, 4),
     ]
     
-    for idx, (p, q, r) in enumerate(small_cases, 12):
-        generate_test_case(p, q, r, idx, output_dir_input, output_dir_output)
+    current_num = start_num
+    for p, q, r in small_cases:
+        generate_test_case(p, q, r, current_num, output_dir_input, output_dir_output)
+        current_num += 1
+    
+    return current_num
 
 def verify_test_case(input_file, output_file):
     """
@@ -165,7 +194,7 @@ def verify_test_case(input_file, output_file):
         return False
 
 def main():
-    """Main function to generate all test cases."""
+    """Main function to generate and append test cases."""
     
     # Create directories if they don't exist
     input_dir = "testcases/input"
@@ -175,25 +204,33 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     
     print("=" * 60)
-    print("Matrix Computation Test Case Generator")
+    print("Matrix Computation Test Case Generator (APPEND MODE)")
     print("Problem: E = A^T * B + C * D^T")
     print("=" * 60)
     
-    print("\n[1/3] Generating near-maximum dimension test cases...")
-    generate_near_max_cases(input_dir, output_dir)
+    # Find next available test number
+    next_num = get_next_test_number(input_dir)
+    print(f"\nNext test case number: {next_num}")
+    print(f"(Existing test cases will be preserved)")
     
-    print("\n[2/3] Generating highly rectangular test cases...")
-    generate_rectangular_cases(input_dir, output_dir)
+    print("\n[1/3] Appending near-maximum dimension test cases...")
+    next_num = generate_near_max_cases(next_num, input_dir, output_dir)
     
-    print("\n[3/3] Generating small test cases...")
-    generate_small_test_cases(input_dir, output_dir)
+    print("\n[2/3] Appending highly rectangular test cases...")
+    next_num = generate_rectangular_cases(next_num, input_dir, output_dir)
+    
+    print("\n[3/3] Appending small test cases...")
+    next_num = generate_small_test_cases(next_num, input_dir, output_dir)
     
     print("\n" + "=" * 60)
-    print("Verifying generated test cases...")
+    print("Verifying newly generated test cases...")
     print("=" * 60)
     
+    # Get starting number for newly added test cases
+    start_verify = next_num - 14  # We added 14 new test cases
+    
     all_verified = True
-    for i in range(1, 15):  # 14 total test cases
+    for i in range(start_verify, next_num):
         input_file = os.path.join(input_dir, f"input{i}.txt")
         output_file = os.path.join(output_dir, f"output{i}.txt")
         
@@ -202,8 +239,11 @@ def main():
                 all_verified = False
     
     print("\n" + "=" * 60)
+    print(f"Summary:")
+    print(f"  New test cases added: {start_verify} to {next_num - 1}")
+    print(f"  Total test cases now: {next_num - 1}")
     if all_verified:
-        print("✓ All test cases generated and verified successfully!")
+        print("✓ All newly generated test cases verified successfully!")
     else:
         print("✗ Some test cases failed verification")
     print("=" * 60)
