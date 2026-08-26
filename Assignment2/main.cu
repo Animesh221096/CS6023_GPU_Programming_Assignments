@@ -5,7 +5,7 @@
 #include <cuda.h>
 using namespace std;
 
-#define BLOCKSIZE_X 16
+#define BLOCKSIZE_X 32
 #define BLOCKSIZE_Y BLOCKSIZE_X
 #define TILE_WIDTH BLOCKSIZE_X
 
@@ -46,6 +46,104 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
 						const int *D, int *E,
 						const int p, const int q, const int r)
 {
+
+	// Compute E = A^T * B + C * D^T
+
+    // A: q×p, A^T: pxq
+    // B: q×r
+	// A^T * B : pxq * q×r = p x r
+
+    // C: p×q
+    // D: r×q, D^T: q×r
+	// C * D^T : pxq * qxr = p x r
+
+    // E is p×r
+
+	__shared__ int tileA[TILE_WIDTH][TILE_WIDTH];
+	__shared__ int tileB[TILE_WIDTH][TILE_WIDTH];
+	__shared__ int tileC[TILE_WIDTH][TILE_WIDTH];
+	__shared__ int tileD[TILE_WIDTH][TILE_WIDTH];
+
+	int row = blockIdx.x * blockDim.x + threadIdx.x;
+    int col = blockIdx.y * blockDim.y + threadIdx.y;
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+	int sum = 0;
+
+
+	// ============ Compute A^T * B ============
+    // A^T is p×q, B is q×r, result is p×r
+    // For each tile of the q dimension:
+	for(int tile = 0; tile < (q + TILE_WIDTH - 1) / TILE_WIDTH; tile++){
+        int k = tile * TILE_WIDTH;
+        
+        // Load A[k+ty][row] into tileA[tx][ty]
+        // A is stored q×p, so A[i][j] is at A[i*p + j]
+        if(k + ty < q && row < p){
+            tileA[tx][ty] = A[(k + ty) * p + row];
+        } else {
+            tileA[tx][ty] = 0;
+        }
+        
+        // Load B[k+tx][col] into tileB[tx][ty]
+        // B is stored q×r, so B[i][j] is at B[i*r + j]
+        if(k + tx < q && col < r){
+            tileB[tx][ty] = B[(k + tx) * r + col];
+        } else {
+            tileB[tx][ty] = 0;
+        }
+        
+        __syncthreads();
+        
+        // Compute partial dot product
+        #pragma unroll
+        for(int i = 0; i < TILE_WIDTH; i++){
+            sum += tileA[tx][i] * tileB[i][ty];
+        }
+        
+        __syncthreads();
+    }
+
+
+	// ============ Compute C * D^T ============
+    // C is p×q, D is r×q (so D^T is q×r), result is p×r
+    // For each tile of the q dimension:
+    for(int tile = 0; tile < (q + TILE_WIDTH - 1) / TILE_WIDTH; tile++){
+        int k = tile * TILE_WIDTH;
+        
+        // Load C[row][k+ty] into tileC[tx][ty]
+        // C is stored p×q, so C[i][j] is at C[i*q + j]
+        if(row < p && k + ty < q){
+            tileC[tx][ty] = C[row * q + (k + ty)];
+        } else {
+            tileC[tx][ty] = 0;
+        }
+        
+        // Load D[col][k+tx] into tileD[tx][ty]
+        // D is stored r×q, so D[i][j] is at D[i*q + j]
+        if(col < r && k + tx < q){
+            tileD[tx][ty] = D[col * q + (k + tx)];
+        } else {
+            tileD[tx][ty] = 0;
+        }
+        
+        __syncthreads();
+        
+        // Compute partial dot product
+        #pragma unroll
+        for(int i = 0; i < TILE_WIDTH; i++){
+            sum += tileC[tx][i] * tileD[i][ty];
+        }
+        
+        __syncthreads();
+    }
+    
+    // Write result
+    if(row < p && col < r){
+        E[row * r + col] = sum;
+    }
 
 }
 
