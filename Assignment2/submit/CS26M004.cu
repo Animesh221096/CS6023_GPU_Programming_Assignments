@@ -49,15 +49,15 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
 
 	// Compute E = A^T * B + C * D^T
 
-    // A: q×p, A^T: pxq
-    // B: q×r
-	// A^T * B : pxq * q×r = p x r
+    // A: qxp, A^T: pxq
+    // B: qxr
+	// A^T * B : pxq * qxr = p x r
 
-    // C: p×q
-    // D: r×q, D^T: q×r
+    // C: pxq
+    // D: rxq, D^T: qxr
 	// C * D^T : pxq * qxr = p x r
 
-    // E is p×r
+    // E is pxr
 
 	__shared__ int tileA[TILE_WIDTH][TILE_WIDTH];
 	__shared__ int tileB[TILE_WIDTH][TILE_WIDTH];
@@ -74,13 +74,13 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
 
 
 	// ============ Compute A^T * B ============
-    // A^T is p×q, B is q×r, result is p×r
+    // A^T is pxq, B is qxr, result is pxr
     // For each tile of the q dimension:
 	for(int tile = 0; tile < (q + TILE_WIDTH - 1) / TILE_WIDTH; tile++){
         int k = tile * TILE_WIDTH;
         
         // Load A[k+ty][row] into tileA[tx][ty]
-        // A is stored q×p, so A[i][j] is at A[i*p + j]
+        // A is stored qxp, so A[i][j] is at A[i*p + j]
         if(k + ty < q && row < p){
             tileA[tx][ty] = A[(k + ty) * p + row];
         } else {
@@ -88,7 +88,7 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
         }
         
         // Load B[k+tx][col] into tileB[tx][ty]
-        // B is stored q×r, so B[i][j] is at B[i*r + j]
+        // B is stored qxr, so B[i][j] is at B[i*r + j]
         if(k + tx < q && col < r){
             tileB[tx][ty] = B[(k + tx) * r + col];
         } else {
@@ -108,13 +108,13 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
 
 
 	// ============ Compute C * D^T ============
-    // C is p×q, D is r×q (so D^T is q×r), result is p×r
+    // C is pxq, D is rxq (so D^T is qxr), result is pxr
     // For each tile of the q dimension:
     for(int tile = 0; tile < (q + TILE_WIDTH - 1) / TILE_WIDTH; tile++){
         int k = tile * TILE_WIDTH;
         
         // Load C[row][k+ty] into tileC[tx][ty]
-        // C is stored p×q, so C[i][j] is at C[i*q + j]
+        // C is stored pxq, so C[i][j] is at C[i*q + j]
         if(row < p && k + ty < q){
             tileC[tx][ty] = C[row * q + (k + ty)];
         } else {
@@ -122,7 +122,7 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
         }
         
         // Load D[col][k+tx] into tileD[tx][ty]
-        // D is stored r×q, so D[i][j] is at D[i*q + j]
+        // D is stored rxq, so D[i][j] is at D[i*q + j]
         if(col < r && k + tx < q){
             tileD[tx][ty] = D[col * q + (k + tx)];
         } else {
