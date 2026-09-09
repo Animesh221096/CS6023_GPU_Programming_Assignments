@@ -9,38 +9,7 @@ using namespace std;
 #define BLOCKSIZE_Y BLOCKSIZE_X
 #define TILE_WIDTH BLOCKSIZE_X
 
-// __global__ void Mat_mul_1(const int *X, const int *Y, int* Z,
-//                         const int p, const int q, const int r){
-//     // X is A^T (p x q)
-//     // Y is B (q x r)
-//     // Z is result (p x r)
 
-//     int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
-//     int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
-
-//     if(idx_x >= p || idx_y >= r){
-//         return;
-//     }
-
-//     for(int i = 0; i < q; i++){
-//         Z[idx_x * r + idx_y] += X[i * p + idx_x] * Y[i * r + idx_y];
-//     }
-// }
-
-// __global__ void Mat_mul_2(const int *X, const int *Y, int* Z,
-//                         const int p, const int q, const int r){
-
-//     int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
-//     int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
-
-//     if(idx_x >= p || idx_y >= r){
-//         return;
-//     }
-
-//     for(int i = 0; i < q; i++){
-//         Z[idx_x * r + idx_y] += X[idx_x * q + i] * Y[idx_y * q + i];
-//     }
-// }
 
 __global__ void Mat_mul(const int *A, const int *B, const int *C,
 						const int *D, int *E,
@@ -81,19 +50,11 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
         
         // Load A[k+ty][row] into tileA[tx][ty]
         // A is stored qxp, so A[i][j] is at A[i*p + j]
-        if(k + ty < q && row < p){
-            tileA[tx][ty] = A[(k + ty) * p + row];
-        } else {
-            tileA[tx][ty] = 0;
-        }
+        tileA[tx][ty] = A[(k + ty) * p + row] * (k + ty < q && row < p);
         
         // Load B[k+tx][col] into tileB[tx][ty]
         // B is stored qxr, so B[i][j] is at B[i*r + j]
-        if(k + tx < q && col < r){
-            tileB[tx][ty] = B[(k + tx) * r + col];
-        } else {
-            tileB[tx][ty] = 0;
-        }
+        tileB[tx][ty] = B[(k + tx) * r + col] * (k + tx < q && col < r);
         
         __syncthreads();
         
@@ -115,19 +76,11 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
         
         // Load C[row][k+ty] into tileC[tx][ty]
         // C is stored pxq, so C[i][j] is at C[i*q + j]
-        if(row < p && k + ty < q){
-            tileC[tx][ty] = C[row * q + (k + ty)];
-        } else {
-            tileC[tx][ty] = 0;
-        }
+        tileC[tx][ty] = C[row * q + (k + ty)] * (row < p && k + ty < q);
         
         // Load D[col][k+tx] into tileD[tx][ty]
         // D is stored rxq, so D[i][j] is at D[i*q + j]
-        if(col < r && k + tx < q){
-            tileD[tx][ty] = D[col * q + (k + tx)];
-        } else {
-            tileD[tx][ty] = 0;
-        }
+        tileD[tx][ty] = D[col * q + (k + tx)] * (col < r && k + tx < q);
         
         __syncthreads();
         
@@ -174,7 +127,7 @@ void compute(int p, int q, int r, int *h_matrixA, int *h_matrixB,
 	cudaMemset(d_matrixE, 0, p * r * sizeof(int));
 
 	dim3 blockSize(BLOCKSIZE_X, BLOCKSIZE_Y);
-	dim3 gridSize((p + BLOCKSIZE_X - 1) / BLOCKSIZE_Y, (r + BLOCKSIZE_Y - 1) / BLOCKSIZE_Y);
+	dim3 gridSize((p + BLOCKSIZE_X - 1) / BLOCKSIZE_X, (r + BLOCKSIZE_Y - 1) / BLOCKSIZE_Y);
 
 	Mat_mul<<<gridSize, blockSize>>>(d_matrixA, d_matrixB, d_matrixC, d_matrixD, d_matrixE, p, q, r);
 
