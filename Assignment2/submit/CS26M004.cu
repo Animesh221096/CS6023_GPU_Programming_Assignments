@@ -50,11 +50,21 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
         
         // Load A[k+ty][row] into tileA[tx][ty]
         // A is stored qxp, so A[i][j] is at A[i*p + j]
-        tileA[tx][ty] = A[(k + ty) * p + row] * (k + ty < q && row < p);
+        // tileA[tx][ty] = A[(k + ty) * p + row] * (k + ty < q && row < p);
+        if(k + ty < q && row < p){
+            tileA[tx][ty] = A[(k + ty) * p + row];
+        } else {
+            tileA[tx][ty] = 0;
+        }
         
         // Load B[k+tx][col] into tileB[tx][ty]
         // B is stored qxr, so B[i][j] is at B[i*r + j]
-        tileB[tx][ty] = B[(k + tx) * r + col] * (k + tx < q && col < r);
+        // tileB[tx][ty] = B[(k + tx) * r + col] * (k + tx < q && col < r);
+        if(k + tx < q && col < r){
+            tileB[tx][ty] = B[(k + tx) * r + col];
+        } else {
+            tileB[tx][ty] = 0;
+        }
         
         __syncthreads();
         
@@ -76,11 +86,21 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
         
         // Load C[row][k+ty] into tileC[tx][ty]
         // C is stored pxq, so C[i][j] is at C[i*q + j]
-        tileC[tx][ty] = C[row * q + (k + ty)] * (row < p && k + ty < q);
+        // tileC[tx][ty] = C[row * q + (k + ty)] * (row < p && k + ty < q);
+        if(row < p && k + ty < q){
+            tileC[tx][ty] = C[row * q + (k + ty)];
+        } else {
+            tileC[tx][ty] = 0;
+        }
         
         // Load D[col][k+tx] into tileD[tx][ty]
         // D is stored rxq, so D[i][j] is at D[i*q + j]
-        tileD[tx][ty] = D[col * q + (k + tx)] * (col < r && k + tx < q);
+        // tileD[tx][ty] = D[col * q + (k + tx)] * (col < r && k + tx < q);
+        if(col < r && k + tx < q){
+            tileD[tx][ty] = D[col * q + (k + tx)];
+        } else {
+            tileD[tx][ty] = 0;
+        }
         
         __syncthreads();
         
