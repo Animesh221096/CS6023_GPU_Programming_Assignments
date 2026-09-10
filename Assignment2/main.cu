@@ -9,38 +9,7 @@ using namespace std;
 #define BLOCKSIZE_Y BLOCKSIZE_X
 #define TILE_WIDTH BLOCKSIZE_X
 
-// __global__ void Mat_mul_1(const int *X, const int *Y, int* Z,
-//                         const int p, const int q, const int r){
-//     // X is A^T (p x q)
-//     // Y is B (q x r)
-//     // Z is result (p x r)
 
-//     int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
-//     int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
-
-//     if(idx_x >= p || idx_y >= r){
-//         return;
-//     }
-
-//     for(int i = 0; i < q; i++){
-//         Z[idx_x * r + idx_y] += X[i * p + idx_x] * Y[i * r + idx_y];
-//     }
-// }
-
-// __global__ void Mat_mul_2(const int *X, const int *Y, int* Z,
-//                         const int p, const int q, const int r){
-
-//     int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
-//     int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
-
-//     if(idx_x >= p || idx_y >= r){
-//         return;
-//     }
-
-//     for(int i = 0; i < q; i++){
-//         Z[idx_x * r + idx_y] += X[idx_x * q + i] * Y[idx_y * q + i];
-//     }
-// }
 
 __global__ void Mat_mul(const int *A, const int *B, const int *C,
 						const int *D, int *E,
@@ -49,15 +18,15 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
 
 	// Compute E = A^T * B + C * D^T
 
-    // A: q×p, A^T: pxq
-    // B: q×r
-	// A^T * B : pxq * q×r = p x r
+    // A: qxp, A^T: pxq
+    // B: qxr
+	// A^T * B : pxq * qxr = p x r
 
-    // C: p×q
-    // D: r×q, D^T: q×r
+    // C: pxq
+    // D: rxq, D^T: qxr
 	// C * D^T : pxq * qxr = p x r
 
-    // E is p×r
+    // E is pxr
 
 	__shared__ int tileA[TILE_WIDTH][TILE_WIDTH];
 	__shared__ int tileB[TILE_WIDTH][TILE_WIDTH];
@@ -74,13 +43,14 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
 
 
 	// ============ Compute A^T * B ============
-    // A^T is p×q, B is q×r, result is p×r
+    // A^T is pxq, B is qxr, result is pxr
     // For each tile of the q dimension:
 	for(int tile = 0; tile < (q + TILE_WIDTH - 1) / TILE_WIDTH; tile++){
         int k = tile * TILE_WIDTH;
         
         // Load A[k+ty][row] into tileA[tx][ty]
-        // A is stored q×p, so A[i][j] is at A[i*p + j]
+        // A is stored qxp, so A[i][j] is at A[i*p + j]
+        // tileA[tx][ty] = A[(k + ty) * p + row] * (k + ty < q && row < p);
         if(k + ty < q && row < p){
             tileA[tx][ty] = A[(k + ty) * p + row];
         } else {
@@ -88,7 +58,8 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
         }
         
         // Load B[k+tx][col] into tileB[tx][ty]
-        // B is stored q×r, so B[i][j] is at B[i*r + j]
+        // B is stored qxr, so B[i][j] is at B[i*r + j]
+        // tileB[tx][ty] = B[(k + tx) * r + col] * (k + tx < q && col < r);
         if(k + tx < q && col < r){
             tileB[tx][ty] = B[(k + tx) * r + col];
         } else {
@@ -108,13 +79,14 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
 
 
 	// ============ Compute C * D^T ============
-    // C is p×q, D is r×q (so D^T is q×r), result is p×r
+    // C is pxq, D is rxq (so D^T is qxr), result is pxr
     // For each tile of the q dimension:
     for(int tile = 0; tile < (q + TILE_WIDTH - 1) / TILE_WIDTH; tile++){
         int k = tile * TILE_WIDTH;
         
         // Load C[row][k+ty] into tileC[tx][ty]
-        // C is stored p×q, so C[i][j] is at C[i*q + j]
+        // C is stored pxq, so C[i][j] is at C[i*q + j]
+        // tileC[tx][ty] = C[row * q + (k + ty)] * (row < p && k + ty < q);
         if(row < p && k + ty < q){
             tileC[tx][ty] = C[row * q + (k + ty)];
         } else {
@@ -122,7 +94,8 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
         }
         
         // Load D[col][k+tx] into tileD[tx][ty]
-        // D is stored r×q, so D[i][j] is at D[i*q + j]
+        // D is stored rxq, so D[i][j] is at D[i*q + j]
+        // tileD[tx][ty] = D[col * q + (k + tx)] * (col < r && k + tx < q);
         if(col < r && k + tx < q){
             tileD[tx][ty] = D[col * q + (k + tx)];
         } else {
@@ -174,7 +147,7 @@ void compute(int p, int q, int r, int *h_matrixA, int *h_matrixB,
 	cudaMemset(d_matrixE, 0, p * r * sizeof(int));
 
 	dim3 blockSize(BLOCKSIZE_X, BLOCKSIZE_Y);
-	dim3 gridSize((p + BLOCKSIZE_X - 1) / BLOCKSIZE_Y, (r + BLOCKSIZE_Y - 1) / BLOCKSIZE_Y);
+	dim3 gridSize((p + BLOCKSIZE_X - 1) / BLOCKSIZE_X, (r + BLOCKSIZE_Y - 1) / BLOCKSIZE_Y);
 
 	Mat_mul<<<gridSize, blockSize>>>(d_matrixA, d_matrixB, d_matrixC, d_matrixD, d_matrixE, p, q, r);
 
