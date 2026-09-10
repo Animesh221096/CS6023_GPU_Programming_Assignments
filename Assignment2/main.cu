@@ -9,8 +9,6 @@ using namespace std;
 #define BLOCKSIZE_Y BLOCKSIZE_X
 #define TILE_WIDTH BLOCKSIZE_X
 
-
-
 __global__ void Mat_mul(const int *A, const int *B, const int *C,
 						const int *D, int *E,
 						const int p, const int q, const int r)
@@ -18,15 +16,15 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
 
 	// Compute E = A^T * B + C * D^T
 
-    // A: qxp, A^T: pxq
-    // B: qxr
+	// A: qxp, A^T: pxq
+	// B: qxr
 	// A^T * B : pxq * qxr = p x r
 
-    // C: pxq
-    // D: rxq, D^T: qxr
+	// C: pxq
+	// D: rxq, D^T: qxr
 	// C * D^T : pxq * qxr = p x r
 
-    // E is pxr
+	// E is pxr
 
 	__shared__ int tileA[TILE_WIDTH][TILE_WIDTH];
 	__shared__ int tileB[TILE_WIDTH][TILE_WIDTH];
@@ -34,91 +32,202 @@ __global__ void Mat_mul(const int *A, const int *B, const int *C,
 	__shared__ int tileD[TILE_WIDTH][TILE_WIDTH];
 
 	int row = blockIdx.x * blockDim.x + threadIdx.x;
-    int col = blockIdx.y * blockDim.y + threadIdx.y;
+	int col = blockIdx.y * blockDim.y + threadIdx.y;
 
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
 
 	int sum = 0;
 
-
 	// ============ Compute A^T * B ============
-    // A^T is pxq, B is qxr, result is pxr
-    // For each tile of the q dimension:
-	for(int tile = 0; tile < (q + TILE_WIDTH - 1) / TILE_WIDTH; tile++){
-        int k = tile * TILE_WIDTH;
-        
-        // Load A[k+ty][row] into tileA[tx][ty]
-        // A is stored qxp, so A[i][j] is at A[i*p + j]
-        // tileA[tx][ty] = A[(k + ty) * p + row] * (k + ty < q && row < p);
-        if(k + ty < q && row < p){
-            tileA[tx][ty] = A[(k + ty) * p + row];
-        } else {
-            tileA[tx][ty] = 0;
-        }
-        
-        // Load B[k+tx][col] into tileB[tx][ty]
-        // B is stored qxr, so B[i][j] is at B[i*r + j]
-        // tileB[tx][ty] = B[(k + tx) * r + col] * (k + tx < q && col < r);
-        if(k + tx < q && col < r){
-            tileB[tx][ty] = B[(k + tx) * r + col];
-        } else {
-            tileB[tx][ty] = 0;
-        }
-        
-        __syncthreads();
-        
-        // Compute partial dot product
-        #pragma unroll
-        for(int i = 0; i < TILE_WIDTH; i++){
-            sum += tileA[tx][i] * tileB[i][ty];
-        }
-        
-        __syncthreads();
-    }
+	// A^T is pxq, B is qxr, result is pxr
+	// For each tile of the q dimension:
+	for (int tile = 0; tile < (q + TILE_WIDTH - 1) / TILE_WIDTH; tile++)
+	{
+		int k = tile * TILE_WIDTH;
 
+		// Load A[k+ty][row] into tileA[tx][ty]
+		// A is stored qxp, so A[i][j] is at A[i*p + j]
+		// tileA[tx][ty] = A[(k + ty) * p + row] * (k + ty < q && row < p);
+		if (k + ty < q && row < p)
+		{
+			tileA[tx][ty] = A[(k + ty) * p + row];
+		}
+		else
+		{
+			tileA[tx][ty] = 0;
+		}
+
+		// Load B[k+tx][col] into tileB[tx][ty]
+		// B is stored qxr, so B[i][j] is at B[i*r + j]
+		// tileB[tx][ty] = B[(k + tx) * r + col] * (k + tx < q && col < r);
+		if (k + tx < q && col < r)
+		{
+			tileB[tx][ty] = B[(k + tx) * r + col];
+		}
+		else
+		{
+			tileB[tx][ty] = 0;
+		}
+
+		__syncthreads();
+
+// Compute partial dot product
+#pragma unroll
+		for (int i = 0; i < TILE_WIDTH; i++)
+		{
+			sum += tileA[tx][i] * tileB[i][ty];
+		}
+
+		__syncthreads();
+	}
 
 	// ============ Compute C * D^T ============
-    // C is pxq, D is rxq (so D^T is qxr), result is pxr
-    // For each tile of the q dimension:
-    for(int tile = 0; tile < (q + TILE_WIDTH - 1) / TILE_WIDTH; tile++){
-        int k = tile * TILE_WIDTH;
-        
-        // Load C[row][k+ty] into tileC[tx][ty]
-        // C is stored pxq, so C[i][j] is at C[i*q + j]
-        // tileC[tx][ty] = C[row * q + (k + ty)] * (row < p && k + ty < q);
-        if(row < p && k + ty < q){
-            tileC[tx][ty] = C[row * q + (k + ty)];
-        } else {
-            tileC[tx][ty] = 0;
-        }
-        
-        // Load D[col][k+tx] into tileD[tx][ty]
-        // D is stored rxq, so D[i][j] is at D[i*q + j]
-        // tileD[tx][ty] = D[col * q + (k + tx)] * (col < r && k + tx < q);
-        if(col < r && k + tx < q){
-            tileD[tx][ty] = D[col * q + (k + tx)];
-        } else {
-            tileD[tx][ty] = 0;
-        }
-        
-        __syncthreads();
-        
-        // Compute partial dot product
-        #pragma unroll
-        for(int i = 0; i < TILE_WIDTH; i++){
-            sum += tileC[tx][i] * tileD[i][ty];
-        }
-        
-        __syncthreads();
-    }
-    
-    // Write result
-    if(row < p && col < r){
-        E[row * r + col] = sum;
-    }
+	// C is pxq, D is rxq (so D^T is qxr), result is pxr
+	// For each tile of the q dimension:
+	for (int tile = 0; tile < (q + TILE_WIDTH - 1) / TILE_WIDTH; tile++)
+	{
+		int k = tile * TILE_WIDTH;
 
+		// Load C[row][k+ty] into tileC[tx][ty]
+		// C is stored pxq, so C[i][j] is at C[i*q + j]
+		// tileC[tx][ty] = C[row * q + (k + ty)] * (row < p && k + ty < q);
+		if (row < p && k + ty < q)
+		{
+			tileC[tx][ty] = C[row * q + (k + ty)];
+		}
+		else
+		{
+			tileC[tx][ty] = 0;
+		}
+
+		// Load D[col][k+tx] into tileD[tx][ty]
+		// D is stored rxq, so D[i][j] is at D[i*q + j]
+		// tileD[tx][ty] = D[col * q + (k + tx)] * (col < r && k + tx < q);
+		if (col < r && k + tx < q)
+		{
+			tileD[tx][ty] = D[col * q + (k + tx)];
+		}
+		else
+		{
+			tileD[tx][ty] = 0;
+		}
+
+		__syncthreads();
+
+// Compute partial dot product
+#pragma unroll
+		for (int i = 0; i < TILE_WIDTH; i++)
+		{
+			sum += tileC[tx][i] * tileD[i][ty];
+		}
+
+		__syncthreads();
+	}
+
+	// Write result
+	if (row < p && col < r)
+	{
+		E[row * r + col] = sum;
+	}
 }
+
+__global__ void Mat_mul_2(const int *A, const int *B, const int *C,
+						  const int *D, int *E,
+						  const int p, const int q, const int r)
+{
+	__shared__ int tileA_C[TILE_WIDTH][TILE_WIDTH];
+	__shared__ int tileB_D[TILE_WIDTH][TILE_WIDTH];
+
+	int row = blockIdx.x * blockDim.x + threadIdx.x;
+	int col = blockIdx.y * blockDim.y + threadIdx.y;
+
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+
+	int sum = 0;
+
+	// Split blocks: first half → A^T * B, second half → C * D^T
+	if (blockIdx.x < gridDim.x / 2)
+	{
+		// ============ Compute A^T * B ============
+		for (int tile = 0; tile < (q + TILE_WIDTH - 1) / TILE_WIDTH; tile++)
+		{
+			int k = tile * TILE_WIDTH;
+
+			if (k + ty < q && row < p)
+			{
+				tileA_C[tx][ty] = A[(k + ty) * p + row];
+			}
+			else
+			{
+				tileA_C[tx][ty] = 0;
+			}
+
+			if (k + tx < q && col < r)
+			{
+				tileB_D[tx][ty] = B[(k + tx) * r + col];
+			}
+			else
+			{
+				tileB_D[tx][ty] = 0;
+			}
+
+			__syncthreads();
+
+#pragma unroll
+			for (int i = 0; i < TILE_WIDTH; i++)
+			{
+				sum += tileA_C[tx][i] * tileB_D[i][ty];
+			}
+
+			__syncthreads();
+		}
+	}
+	else
+	{
+		// ============ Compute C * D^T ============
+		for (int tile = 0; tile < (q + TILE_WIDTH - 1) / TILE_WIDTH; tile++)
+		{
+			int k = tile * TILE_WIDTH;
+
+			if (row < p && k + ty < q)
+			{
+				tileA_C[tx][ty] = C[row * q + (k + ty)];
+			}
+			else
+			{
+				tileA_C[tx][ty] = 0;
+			}
+
+			if (col < r && k + tx < q)
+			{
+				tileB_D[tx][ty] = D[col * q + (k + tx)];
+			}
+			else
+			{
+				tileB_D[tx][ty] = 0;
+			}
+
+			__syncthreads();
+
+#pragma unroll
+			for (int i = 0; i < TILE_WIDTH; i++)
+			{
+				sum += tileA_C[tx][i] * tileB_D[i][ty];
+			}
+
+			__syncthreads();
+		}
+	}
+
+	// Accumulate results using atomic add
+	if (row < p && col < r)
+	{
+		atomicAdd(&E[row * r + col], sum);
+	}
+}
+
 
 // function to compute the output matrix
 void compute(int p, int q, int r, int *h_matrixA, int *h_matrixB,
@@ -148,8 +257,10 @@ void compute(int p, int q, int r, int *h_matrixA, int *h_matrixB,
 
 	dim3 blockSize(BLOCKSIZE_X, BLOCKSIZE_Y);
 	dim3 gridSize((p + BLOCKSIZE_X - 1) / BLOCKSIZE_X, (r + BLOCKSIZE_Y - 1) / BLOCKSIZE_Y);
+	dim3 gridSize_2(2 * (p + BLOCKSIZE_X - 1) / BLOCKSIZE_X, (r + BLOCKSIZE_Y - 1) / BLOCKSIZE_Y);
 
-	Mat_mul<<<gridSize, blockSize>>>(d_matrixA, d_matrixB, d_matrixC, d_matrixD, d_matrixE, p, q, r);
+	// Mat_mul<<<gridSize, blockSize>>>(d_matrixA, d_matrixB, d_matrixC, d_matrixD, d_matrixE, p, q, r);
+	Mat_mul_2<<<gridSize_2, blockSize>>>(d_matrixA, d_matrixB, d_matrixC, d_matrixD, d_matrixE, p, q, r);
 
 	/* ****************************************************************** */
 
