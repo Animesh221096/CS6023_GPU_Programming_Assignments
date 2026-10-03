@@ -260,7 +260,7 @@ int main(int argc, char **argv)
         cudaMemcpy(h_tent, d_tent, N * sizeof(int), cudaMemcpyDeviceToHost);
 
         // Write source vertex
-        outfile << source << "\n";
+        // outfile << source << "\n";
 
         // Write distances for all vertices
         for (int v = 0; v < N; ++v)
