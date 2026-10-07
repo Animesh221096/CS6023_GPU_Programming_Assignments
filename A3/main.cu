@@ -27,37 +27,103 @@ __global__ void initialize_distances(int *dist, int N, int source)
     }
 }
 
-// Kernel to relax edges in parallel
-// Each thread processes one vertex u and relaxes all its outgoing edges
-__global__ void relax_edges(
+// Rebuild the Far queue: every vertex with a finite tentative distance
+// strictly greater than last_cutoff is unsettled/active.
+// (Equivalent to ghost pruning: entries with key <= last_cutoff are dropped.)
+__global__ void build_far_queue(
+    int *dist,
+    int *far_vertices,
+    int *count,
+    int N,
+    int last_cutoff)
+{
+    int u = blockIdx.x * blockDim.x + threadIdx.x;
+    if (u < N && dist[u] != INF && dist[u] > last_cutoff)
+    {
+        int pos = atomicAdd(count, 1);
+        far_vertices[pos] = u;
+    }
+}
+
+// Fill the key array: key = current tentative distance of each far vertex
+__global__ void fill_keys(int *dist, int *far_vertices, int *far_keys, int count)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count)
+    {
+        far_keys[i] = dist[far_vertices[i]];
+    }
+}
+
+// Light edge relaxation (weight <= delta) from active vertices (dist <= cutoff)
+__global__ void relax_light_edges(
     int *dist,
     int *offsets,
     int *neighs,
     int *weights,
     int N,
+    int delta,
+    int cutoff,
     int *updated)
 {
     int u = blockIdx.x * blockDim.x + threadIdx.x;
     if (u >= N)
         return;
 
-    // Skip if source vertex is unreachable
-    if (dist[u] == INF)
+    int du = dist[u];
+    if (du == INF || du > cutoff)
         return;
 
-    // Relax all outgoing edges from u: (u, v) where v ∈ neighs[offsets[u]...offsets[u+1])
-    for (int edge_idx = offsets[u]; edge_idx < offsets[u + 1]; ++edge_idx)
+    for (int e = offsets[u]; e < offsets[u + 1]; ++e)
     {
-        int v = neighs[edge_idx];
-        int weight = weights[edge_idx];
-        int new_dist = dist[u] + weight;
+        int w = weights[e];
+        if (w > delta)
+            continue;
 
-        // Use atomic minimum to safely update dist[v]
-        // This ensures that concurrent updates from different threads don't race
-        if (new_dist < dist[v])
+        int v = neighs[e];
+        int nd = du + w;
+        if (nd < dist[v])
         {
-            int old_val = atomicMin(&dist[v], new_dist);
-            if (old_val > new_dist)
+            int old = atomicMin(&dist[v], nd);
+            if (old > nd)
+            {
+                *updated = 1;
+            }
+        }
+    }
+}
+
+// Heavy edge relaxation (weight > delta) from active vertices (dist <= cutoff)
+__global__ void relax_heavy_edges(
+    int *dist,
+    int *offsets,
+    int *neighs,
+    int *weights,
+    int N,
+    int delta,
+    int cutoff,
+    int *updated)
+{
+    int u = blockIdx.x * blockDim.x + threadIdx.x;
+    if (u >= N)
+        return;
+
+    int du = dist[u];
+    if (du == INF || du > cutoff)
+        return;
+
+    for (int e = offsets[u]; e < offsets[u + 1]; ++e)
+    {
+        int w = weights[e];
+        if (w <= delta)
+            continue;
+
+        int v = neighs[e];
+        int nd = du + w;
+        if (nd < dist[v])
+        {
+            int old = atomicMin(&dist[v], nd);
+            if (old > nd)
             {
                 *updated = 1;
             }
@@ -70,19 +136,122 @@ __global__ void relax_edges(
 // ============================================================================
 
 void run_delta_stepping_single_source(
-    /*
-
-
-
-
-    */
-)
+    int *d_dist,
+    int *d_offsets,
+    int *d_neighs,
+    int *d_weights,
+    int N,
+    int E,
+    int source,
+    int delta_mode, // -1 for adaptive, >= 0 for static
+    int K,          // batch capacity (adaptive mode)
+    // Workspace (allocated once in main, reused across sources)
+    int *d_far_vertices,
+    int *d_far_keys,
+    int *d_updated,
+    int *d_count,
+    std::ofstream &outfile) // delta trace is written here, interleaved with distances
 {
-    /*
-    for adaptive delta, print from within this function. That would be easy.
+    int threads_per_block = BLOCK_SIZE;
+    int blocks = (N + threads_per_block - 1) / threads_per_block;
 
+    // Initialize source distance
+    initialize_distances<<<blocks, threads_per_block>>>(d_dist, N, source);
+    cudaDeviceSynchronize();
 
-    */
+    thrust::device_ptr<int> far_v_ptr(d_far_vertices);
+    thrust::device_ptr<int> far_k_ptr(d_far_keys);
+
+    int last_cutoff = -1; // dist >= 0 always, so the source is picked up in round 1
+
+    while (true)
+    {
+        // =====================================================
+        // PHASE 3: Rebuild Far queue (fresh scan == ghost pruning)
+        // =====================================================
+        cudaMemset(d_count, 0, sizeof(int));
+        build_far_queue<<<blocks, threads_per_block>>>(
+            d_dist, d_far_vertices, d_count, N, last_cutoff);
+        cudaDeviceSynchronize();
+
+        int far_count = 0;
+        cudaMemcpy(&far_count, d_count, sizeof(int), cudaMemcpyDeviceToHost);
+
+        if (far_count == 0)
+            break; // all reachable vertices settled
+
+        fill_keys<<<blocks, threads_per_block>>>(
+            d_dist, d_far_vertices, d_far_keys, far_count);
+        cudaDeviceSynchronize();
+
+        // Sort by tentative distance (keys ascending)
+        thrust::sort_by_key(far_k_ptr, far_k_ptr + far_count, far_v_ptr);
+
+        // --- Catch 1: Re-anchor Dmin from far_keys[0] ---
+        int Dmin = 0;
+        cudaMemcpy(&Dmin, d_far_keys, sizeof(int), cudaMemcpyDeviceToHost);
+
+        // --- Catch 2: Delta calculation and trace output ---
+        int delta = 0;
+        int Dcutoff = 0;
+
+        if (delta_mode == -1)
+        {
+            // Adaptive mode
+            int itarget = std::min(K - 1, far_count - 1);
+            cudaMemcpy(&Dcutoff, d_far_keys + itarget, sizeof(int), cudaMemcpyDeviceToHost);
+
+            int raw_delta = Dcutoff - Dmin;
+
+            // Trace log: write the RAW delta, even if it is 0
+            outfile << raw_delta << "\n";
+
+            delta = (raw_delta == 0) ? 1 : raw_delta; // internal active delta
+        }
+        else
+        {
+            // Static mode
+            delta = delta_mode;
+            Dcutoff = Dmin + delta;
+        }
+
+        last_cutoff = Dcutoff;
+
+        // --- Catch 3: right-inclusive extraction is implicit ---
+        // The relaxation kernels process every vertex with
+        // dist[u] <= last_cutoff, i.e. ALL vertices of the plateau
+        // (upper_bound semantics), not just the first K.
+
+        // =====================================================
+        // PHASE 1: Light edge relaxation until convergence
+        // =====================================================
+        while (true)
+        {
+            int h_updated = 0;
+            cudaMemset(d_updated, 0, sizeof(int));
+
+            relax_light_edges<<<blocks, threads_per_block>>>(
+                d_dist, d_offsets, d_neighs, d_weights,
+                N, delta, last_cutoff, d_updated);
+            cudaDeviceSynchronize();
+
+            cudaMemcpy(&h_updated, d_updated, sizeof(int), cudaMemcpyDeviceToHost);
+            if (h_updated == 0)
+                break;
+        }
+
+        // =====================================================
+        // PHASE 2: Heavy edge relaxation (once per bucket)
+        // =====================================================
+        cudaMemset(d_updated, 0, sizeof(int));
+        relax_heavy_edges<<<blocks, threads_per_block>>>(
+            d_dist, d_offsets, d_neighs, d_weights,
+            N, delta, last_cutoff, d_updated);
+        cudaDeviceSynchronize();
+
+        // last_cutoff strictly increases every round (Dmin > last_cutoff
+        // by construction of build_far_queue), so termination is guaranteed.
+    }
 }
 
 
@@ -90,6 +259,7 @@ void run_delta_stepping_single_source(
 // SINGLE SOURCE BELLMAN-FORD DRIVER
 // ============================================================================
 
+/*
 void run_parallel_bellman_ford_single_source(
     int *d_dist,
     int *d_offsets,
@@ -141,7 +311,7 @@ void run_parallel_bellman_ford_single_source(
 
     cudaFree(d_updated);
 }
-
+*/
 
 // ============================================================================
 // MAIN FUNCTION
@@ -179,19 +349,19 @@ int main(int argc, char **argv)
         infile >> sources[i];
     }
 
-    int *offsets = new int[ N + 1 ] { 0 };
+    int *offsets = new int[N + 1]{0};
     for (int i = 0; i <= N; ++i)
     {
         infile >> offsets[i];
     }
 
-    int *neighs = new int[ E ] { 0 };
+    int *neighs = new int[E]{0};
     for (int i = 0; i < E; ++i)
     {
         infile >> neighs[i];
     }
 
-    int *weights = new int[ E ] { 0 };
+    int *weights = new int[E]{0};
     for (int i = 0; i < E; ++i)
     {
         infile >> weights[i];
@@ -208,22 +378,16 @@ int main(int argc, char **argv)
     cudaMemcpy(d_neighs, neighs, E * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_weights, weights, E * sizeof(int), cudaMemcpyHostToDevice);
 
-    int *h_tent = new int[ N ] { 0 }; // sssp distance array. tent means tentative distance
-    int *d_tent;
-    cudaMalloc(&d_tent, N * sizeof(int));
+    int *h_tent = new int[N]{0}; // sssp distance array. tent means tentative distance
+    int *d_dist;
+    cudaMalloc(&d_dist, N * sizeof(int));
 
-
-    /*
-    ToDo
-
-
-
-
-
-
-
-
-    */
+    // Workspace: allocated ONCE (VRAM allocation policy), reused per source
+    int *d_far_vertices, *d_far_keys, *d_updated, *d_count;
+    cudaMalloc(&d_far_vertices, N * sizeof(int));
+    cudaMalloc(&d_far_keys, N * sizeof(int));
+    cudaMalloc(&d_updated, sizeof(int));
+    cudaMalloc(&d_count, sizeof(int));
 
     // Process each source query sequentially
     for (int i = 0; i < S_count; ++i)
@@ -233,34 +397,36 @@ int main(int argc, char **argv)
         outfile << source << "\n";
 
         run_delta_stepping_single_source(
-            /*
-            ToDo
-            
-
-
-
-
-
-            */
-        );
+            d_dist,
+            d_offsets,
+            d_neighs,
+            d_weights,
+            N,
+            E,
+            source,
+            delta_mode,
+            K,
+            d_far_vertices,
+            d_far_keys,
+            d_updated,
+            d_count,
+            outfile);
 
         // Run parallel Bellman-Ford for this source
+        /*
         run_parallel_bellman_ford_single_source(
-            d_tent,
+            d_dist,
             d_offsets,
             d_neighs,
             d_weights,
             N,
             E,
             source);
+        */
 
         // Copy results back to host
 
-
-        cudaMemcpy(h_tent, d_tent, N * sizeof(int), cudaMemcpyDeviceToHost);
-
-        // Write source vertex
-        // outfile << source << "\n";
+        cudaMemcpy(h_tent, d_dist, N * sizeof(int), cudaMemcpyDeviceToHost);
 
         // Write distances for all vertices
         for (int v = 0; v < N; ++v)
@@ -273,7 +439,11 @@ int main(int argc, char **argv)
     cudaFree(d_offsets);
     cudaFree(d_neighs);
     cudaFree(d_weights);
-    cudaFree(d_tent);
+    cudaFree(d_dist);
+    cudaFree(d_far_vertices);
+    cudaFree(d_far_keys);
+    cudaFree(d_updated);
+    cudaFree(d_count);
 
     delete[] offsets;
     delete[] neighs;
