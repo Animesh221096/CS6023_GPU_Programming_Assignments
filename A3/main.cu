@@ -4,58 +4,51 @@
 #include <algorithm>
 #include <cuda_runtime.h>
 #include <thrust/device_ptr.h>
+#include <thrust/device_vector.h>
 #include <thrust/sort.h>
 #include <thrust/unique.h>
 #include <thrust/binary_search.h>
 #include <thrust/copy.h>
+#include <thrust/fill.h>
+#include <thrust/transform.h>
+#include <thrust/functional.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
 
 #define INF 2147483647 // simply INT_MAX
 #define BLOCK_SIZE 256 // you can change it.
 
 // ============================================================================
-// CUDA KERNELS
+// THRUST FUNCTORS
 // ============================================================================
 
-// Kernel to initialize distances: dist[source] = 0, all others = INF
-__global__ void initialize_distances(int *dist, int N, int source)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N)
-    {
-        // Set source distance to 0, all others to infinity
-        dist[idx] = (idx == source) ? 0 : INF;
-    }
-}
+// Functor to identify unsettled vertices (dist > last_cutoff and dist != INF)
+struct is_unsettled {
+    int last_cutoff;
+    int *dist;
 
-// Rebuild the Far queue: every vertex with a finite tentative distance
-// strictly greater than last_cutoff is unsettled/active.
-// (Equivalent to ghost pruning: entries with key <= last_cutoff are dropped.)
-__global__ void build_far_queue(
-    int *dist,
-    int *far_vertices,
-    int *count,
-    int N,
-    int last_cutoff)
-{
-    int u = blockIdx.x * blockDim.x + threadIdx.x;
-    if (u < N && dist[u] != INF && dist[u] > last_cutoff)
-    {
-        // Add unsettled vertices (those with dist > cutoff) to queue
-        int pos = atomicAdd(count, 1);
-        far_vertices[pos] = u;
-    }
-}
+    is_unsettled(int cutoff, int *d) : last_cutoff(cutoff), dist(d) {}
 
-// Fill the key array: key = current tentative distance of each far vertex
-__global__ void fill_keys(int *dist, int *far_vertices, int *far_keys, int count)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < count)
-    {
-        // Store the distance of each vertex in the Far queue for sorting
-        far_keys[i] = dist[far_vertices[i]];
+    __device__ bool operator()(int u) const {
+        return dist[u] != INF && dist[u] > last_cutoff;
     }
-}
+};
+
+// Functor to extract distance from vertex index
+struct get_distance {
+    int *dist;
+    int *far_vertices;
+
+    get_distance(int *d, int *fv) : dist(d), far_vertices(fv) {}
+
+    __device__ int operator()(int i) const {
+        return dist[far_vertices[i]];
+    }
+};
+
+// ============================================================================
+// CUDA KERNELS (remaining: relaxation only)
+// ============================================================================
 
 // Light edge relaxation (weight <= delta) from active vertices (dist <= cutoff)
 __global__ void relax_light_edges(
@@ -156,16 +149,18 @@ void run_delta_stepping_single_source(
     int *d_far_vertices,
     int *d_far_keys,
     int *d_updated,
-    int *d_count,
     std::ofstream &outfile)
 {
     int threads_per_block = BLOCK_SIZE;
     int blocks = (N + threads_per_block - 1) / threads_per_block;
 
-    // Initialize distances: source=0, others=INF
-    initialize_distances<<<blocks, threads_per_block>>>(d_dist, N, source);
+    // Initialize distances: source=0, others=INF using Thrust
+    thrust::device_ptr<int> dist_ptr(d_dist);
+    thrust::fill(dist_ptr, dist_ptr + N, INF);
+    dist_ptr[source] = 0;
     cudaDeviceSynchronize();
 
+    // Thrust pointers for Far queue management
     thrust::device_ptr<int> far_v_ptr(d_far_vertices);
     thrust::device_ptr<int> far_k_ptr(d_far_keys);
 
@@ -178,22 +173,24 @@ void run_delta_stepping_single_source(
         round_num++;
 
         // =====================================================
-        // PHASE 3: Rebuild Far queue (includes ghost pruning)
+        // PHASE 3: Rebuild Far queue using Thrust (ghost pruning)
         // =====================================================
 
-        // Reset counter before building new Far queue
-        cudaMemset(d_count, 0, sizeof(int));
+        // Copy all vertex indices to a temporary array
+        thrust::device_vector<int> all_vertices(N);
+        thrust::sequence(all_vertices.begin(), all_vertices.end(), 0);
 
-        // Build Far queue: collect all vertices with dist > last_cutoff
-        build_far_queue<<<blocks, threads_per_block>>>(
-            d_dist, d_far_vertices, d_count, N, last_cutoff);
+        // Filter unsettled vertices using thrust::copy_if
+        is_unsettled filter(last_cutoff, d_dist);
+        thrust::device_ptr<int> far_end = thrust::copy_if(
+            all_vertices.begin(),
+            all_vertices.end(),
+            far_v_ptr,
+            filter);
 
-        // Wait for all threads to finish atomic operations
+        // Calculate count of unsettled vertices
+        int far_count = far_end - far_v_ptr;
         cudaDeviceSynchronize();
-
-        // Retrieve count of unsettled vertices
-        int far_count = 0;
-        cudaMemcpy(&far_count, d_count, sizeof(int), cudaMemcpyDeviceToHost);
 
         // TERMINATION: If no unsettled vertices remain, we're done
         if (far_count == 0)
@@ -201,18 +198,22 @@ void run_delta_stepping_single_source(
             break;
         }
 
-        // Fill keys array with distances of vertices in Far queue
-        fill_keys<<<blocks, threads_per_block>>>(
-            d_dist, d_far_vertices, d_far_keys, far_count);
+        // Fill keys array using Thrust transform
+        // Extract distances for each vertex in Far queue
+        get_distance extract(d_dist, d_far_vertices);
+        thrust::transform(
+            thrust::counting_iterator<int>(0),
+            thrust::counting_iterator<int>(far_count),
+            far_k_ptr,
+            extract);
         cudaDeviceSynchronize();
 
-        // Sort Far queue by distance using thrust
+        // Sort Far queue by distance using Thrust
         thrust::sort_by_key(far_k_ptr, far_k_ptr + far_count, far_v_ptr);
         cudaDeviceSynchronize();
 
         // Get minimum distance (Dmin) from sorted queue
-        int Dmin = 0;
-        cudaMemcpy(&Dmin, d_far_keys, sizeof(int), cudaMemcpyDeviceToHost);
+        int Dmin = far_k_ptr[0];
 
         // Calculate Delta and Dcutoff based on mode
         int delta = 0;
@@ -222,10 +223,9 @@ void run_delta_stepping_single_source(
         {
             // Adaptive mode: set delta based on K-th smallest distance
             int itarget = std::min(K - 1, far_count - 1);
-            cudaMemcpy(&Dcutoff, d_far_keys + itarget,
-                       sizeof(int), cudaMemcpyDeviceToHost);
+            int Dcutoff_temp = far_k_ptr[itarget];
 
-            int raw_delta = Dcutoff - Dmin;
+            int raw_delta = Dcutoff_temp - Dmin;
 
             // Log delta values (skip first round)
             if (round_num != 1)
@@ -235,6 +235,7 @@ void run_delta_stepping_single_source(
 
             // Prevent zero delta
             delta = (raw_delta == 0) ? 1 : raw_delta;
+            Dcutoff = Dmin + delta;
         }
         else
         {
@@ -250,7 +251,9 @@ void run_delta_stepping_single_source(
         // =====================================================
         while (true)
         {
-            cudaMemset(d_updated, 0, sizeof(int));
+            // Reset updated flag
+            thrust::fill(thrust::device_ptr<int>(d_updated),
+                        thrust::device_ptr<int>(d_updated) + 1, 0);
 
             // Relax edges with weight <= delta
             relax_light_edges<<<blocks, threads_per_block>>>(
@@ -270,7 +273,9 @@ void run_delta_stepping_single_source(
         // =====================================================
         // PHASE 2: Heavy Edge Relaxation (single pass)
         // =====================================================
-        cudaMemset(d_updated, 0, sizeof(int));
+        // Reset updated flag
+        thrust::fill(thrust::device_ptr<int>(d_updated),
+                    thrust::device_ptr<int>(d_updated) + 1, 0);
 
         // Relax edges with weight > delta (once per round)
         relax_heavy_edges<<<blocks, threads_per_block>>>(
@@ -338,6 +343,7 @@ int main(int argc, char **argv)
 
     infile.close();
 
+    // Allocate and copy graph structure to GPU
     int *d_offsets = nullptr, *d_neighs = nullptr, *d_weights = nullptr;
     cudaMalloc(&d_offsets, (N + 1) * sizeof(int));
     cudaMalloc(&d_neighs, E * sizeof(int));
@@ -347,16 +353,16 @@ int main(int argc, char **argv)
     cudaMemcpy(d_neighs, neighs, E * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_weights, weights, E * sizeof(int), cudaMemcpyHostToDevice);
 
-    int *h_tent = new int[N]{0}; // sssp distance array. tent means tentative distance
+    // Allocate distance array on both host and device
+    int *h_tent = new int[N]{0}; // SSSP distance array
     int *d_dist;
     cudaMalloc(&d_dist, N * sizeof(int));
 
     // Workspace: allocated ONCE (VRAM allocation policy), reused per source
-    int *d_far_vertices, *d_far_keys, *d_updated, *d_count;
+    int *d_far_vertices, *d_far_keys, *d_updated;
     cudaMalloc(&d_far_vertices, N * sizeof(int));
     cudaMalloc(&d_far_keys, N * sizeof(int));
     cudaMalloc(&d_updated, sizeof(int));
-    cudaMalloc(&d_count, sizeof(int));
 
     // Process each source query sequentially
     for (int i = 0; i < S_count; ++i)
@@ -381,11 +387,12 @@ int main(int argc, char **argv)
             d_far_vertices,
             d_far_keys,
             d_updated,
-            d_count,
             outfile);
 
-        // Transfer computed distances from GPU to CPU
-        cudaMemcpy(h_tent, d_dist, N * sizeof(int), cudaMemcpyDeviceToHost);
+        // Transfer computed distances from GPU to CPU using Thrust
+        thrust::copy(thrust::device_ptr<int>(d_dist),
+                    thrust::device_ptr<int>(d_dist) + N,
+                    h_tent);
 
         // Write shortest distances for all vertices
         for (int v = 0; v < N; ++v)
@@ -402,7 +409,6 @@ int main(int argc, char **argv)
     cudaFree(d_far_vertices);
     cudaFree(d_far_keys);
     cudaFree(d_updated);
-    cudaFree(d_count);
 
     delete[] offsets;
     delete[] neighs;
