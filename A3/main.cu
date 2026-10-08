@@ -12,7 +12,6 @@
 #define INF 2147483647 // simply INT_MAX
 #define BLOCK_SIZE 256 // you can change it.
 
-
 // ============================================================================
 // CUDA KERNELS
 // ============================================================================
@@ -23,6 +22,7 @@ __global__ void initialize_distances(int *dist, int N, int source)
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < N)
     {
+        // Set source distance to 0, all others to infinity
         dist[idx] = (idx == source) ? 0 : INF;
     }
 }
@@ -40,6 +40,7 @@ __global__ void build_far_queue(
     int u = blockIdx.x * blockDim.x + threadIdx.x;
     if (u < N && dist[u] != INF && dist[u] > last_cutoff)
     {
+        // Add unsettled vertices (those with dist > cutoff) to queue
         int pos = atomicAdd(count, 1);
         far_vertices[pos] = u;
     }
@@ -51,6 +52,7 @@ __global__ void fill_keys(int *dist, int *far_vertices, int *far_keys, int count
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < count)
     {
+        // Store the distance of each vertex in the Far queue for sorting
         far_keys[i] = dist[far_vertices[i]];
     }
 }
@@ -71,23 +73,26 @@ __global__ void relax_light_edges(
         return;
 
     int du = dist[u];
+    // Only process vertices within current cutoff
     if (du == INF || du > cutoff)
         return;
 
+    // Relax all light edges (weight <= delta) from this vertex
     for (int e = offsets[u]; e < offsets[u + 1]; ++e)
     {
         int w = weights[e];
         if (w > delta)
-            continue;
+            continue; // Skip heavy edges
 
         int v = neighs[e];
         int nd = du + w;
+        // Update neighbor distance if shorter path found
         if (nd < dist[v])
         {
             int old = atomicMin(&dist[v], nd);
             if (old > nd)
             {
-                *updated = 1;
+                *updated = 1; // Flag that updates occurred
             }
         }
     }
@@ -109,23 +114,26 @@ __global__ void relax_heavy_edges(
         return;
 
     int du = dist[u];
+    // Only process vertices within current cutoff
     if (du == INF || du > cutoff)
         return;
 
+    // Relax all heavy edges (weight > delta) from this vertex
     for (int e = offsets[u]; e < offsets[u + 1]; ++e)
     {
         int w = weights[e];
         if (w <= delta)
-            continue;
+            continue; // Skip light edges
 
         int v = neighs[e];
         int nd = du + w;
+        // Update neighbor distance if shorter path found
         if (nd < dist[v])
         {
             int old = atomicMin(&dist[v], nd);
             if (old > nd)
             {
-                *updated = 1;
+                *updated = 1; // Flag that updates occurred
             }
         }
     }
@@ -154,7 +162,7 @@ void run_delta_stepping_single_source(
     int threads_per_block = BLOCK_SIZE;
     int blocks = (N + threads_per_block - 1) / threads_per_block;
 
-    // Initialize distances
+    // Initialize distances: source=0, others=INF
     initialize_distances<<<blocks, threads_per_block>>>(d_dist, N, source);
     cudaDeviceSynchronize();
 
@@ -164,72 +172,73 @@ void run_delta_stepping_single_source(
     int last_cutoff = -1;
     int round_num = 0;
 
-    // MAIN LOOP - Ensure this continues until all reachable vertices settled
+    // MAIN LOOP - Continue until all reachable vertices are settled
     while (true)
     {
         round_num++;
-        
+
         // =====================================================
         // PHASE 3: Rebuild Far queue (includes ghost pruning)
         // =====================================================
-        
-        // Reset counter BEFORE building
+
+        // Reset counter before building new Far queue
         cudaMemset(d_count, 0, sizeof(int));
-        
-        // Build Far queue from CURRENT distances
+
+        // Build Far queue: collect all vertices with dist > last_cutoff
         build_far_queue<<<blocks, threads_per_block>>>(
             d_dist, d_far_vertices, d_count, N, last_cutoff);
-        
-        // CRITICAL: Synchronize to ensure all atomsics complete
+
+        // Wait for all threads to finish atomic operations
         cudaDeviceSynchronize();
-        
-        // Get the count
+
+        // Retrieve count of unsettled vertices
         int far_count = 0;
         cudaMemcpy(&far_count, d_count, sizeof(int), cudaMemcpyDeviceToHost);
-        
-        // TERMINATION CHECK
+
+        // TERMINATION: If no unsettled vertices remain, we're done
         if (far_count == 0)
         {
-            // All reachable vertices settled
             break;
         }
-        
-        // Fill keys with current distances
+
+        // Fill keys array with distances of vertices in Far queue
         fill_keys<<<blocks, threads_per_block>>>(
             d_dist, d_far_vertices, d_far_keys, far_count);
         cudaDeviceSynchronize();
 
-        // Sort Far queue by distance
+        // Sort Far queue by distance using thrust
         thrust::sort_by_key(far_k_ptr, far_k_ptr + far_count, far_v_ptr);
         cudaDeviceSynchronize();
-        
-        // Get Dmin from sorted Far queue
+
+        // Get minimum distance (Dmin) from sorted queue
         int Dmin = 0;
         cudaMemcpy(&Dmin, d_far_keys, sizeof(int), cudaMemcpyDeviceToHost);
 
-        // Calculate Delta
+        // Calculate Delta and Dcutoff based on mode
         int delta = 0;
         int Dcutoff = 0;
 
         if (delta_mode == -1)
         {
-            // Adaptive mode
+            // Adaptive mode: set delta based on K-th smallest distance
             int itarget = std::min(K - 1, far_count - 1);
-            cudaMemcpy(&Dcutoff, d_far_keys + itarget, 
-                      sizeof(int), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&Dcutoff, d_far_keys + itarget,
+                       sizeof(int), cudaMemcpyDeviceToHost);
 
             int raw_delta = Dcutoff - Dmin;
-            
-            // OUTPUT DELTA LOG (THIS IS WHAT GRADER EXPECTS)
-            if(round_num != 1){
+
+            // Log delta values (skip first round)
+            if (round_num != 1)
+            {
                 outfile << raw_delta << "\n";
             }
-            
+
+            // Prevent zero delta
             delta = (raw_delta == 0) ? 1 : raw_delta;
         }
         else
         {
-            // Static mode
+            // Static mode: use predefined delta value
             delta = delta_mode;
             Dcutoff = Dmin + delta;
         }
@@ -237,96 +246,41 @@ void run_delta_stepping_single_source(
         last_cutoff = Dcutoff;
 
         // =====================================================
-        // PHASE 1: Light Edge Relaxation
+        // PHASE 1: Light Edge Relaxation (repeat until convergence)
         // =====================================================
         while (true)
         {
             cudaMemset(d_updated, 0, sizeof(int));
 
+            // Relax edges with weight <= delta
             relax_light_edges<<<blocks, threads_per_block>>>(
                 d_dist, d_offsets, d_neighs, d_weights,
                 N, delta, last_cutoff, d_updated);
             cudaDeviceSynchronize();
 
+            // Check if any distance updates occurred
             int h_updated = 0;
             cudaMemcpy(&h_updated, d_updated, sizeof(int), cudaMemcpyDeviceToHost);
-            
-            if (h_updated == 0) break;
+
+            // Exit loop if no changes (convergence)
+            if (h_updated == 0)
+                break;
         }
 
         // =====================================================
-        // PHASE 2: Heavy Edge Relaxation
+        // PHASE 2: Heavy Edge Relaxation (single pass)
         // =====================================================
         cudaMemset(d_updated, 0, sizeof(int));
-        
+
+        // Relax edges with weight > delta (once per round)
         relax_heavy_edges<<<blocks, threads_per_block>>>(
             d_dist, d_offsets, d_neighs, d_weights,
             N, delta, last_cutoff, d_updated);
         cudaDeviceSynchronize();
 
-        // Loop continues to next round
-        // Next round will rebuild Far queue with UPDATED distances
+        // Loop continues: next iteration rebuilds Far queue with updated distances
     }
 }
-
-
-// ============================================================================
-// SINGLE SOURCE BELLMAN-FORD DRIVER
-// ============================================================================
-
-/*
-void run_parallel_bellman_ford_single_source(
-    int *d_dist,
-    int *d_offsets,
-    int *d_neighs,
-    int *d_weights,
-    int N,
-    int E,
-    int source)
-{
-    // Calculate grid and block dimensions
-    int threads_per_block = BLOCK_SIZE;
-    int blocks = (N + threads_per_block - 1) / threads_per_block;
-
-    // Phase 1: Initialize distances
-    initialize_distances<<<blocks, threads_per_block>>>(d_dist, N, source);
-    cudaDeviceSynchronize();
-
-    // Allocate device memory for the "updated" flag
-    int *d_updated = nullptr;
-    cudaMalloc(&d_updated, sizeof(int));
-
-    // Phase 2: Iteratively relax edges until convergence
-    // Bellman-Ford worst case: N-1 iterations, but may converge earlier
-    for (int iter = 0; iter < N - 1; ++iter)
-    {
-        // Reset the updated flag to 0 before this iteration
-        int h_updated = 0;
-        cudaMemcpy(d_updated, &h_updated, sizeof(int), cudaMemcpyHostToDevice);
-
-        // Launch relaxation kernel
-        relax_edges<<<blocks, threads_per_block>>>(
-            d_dist,
-            d_offsets,
-            d_neighs,
-            d_weights,
-            N,
-            d_updated);
-        cudaDeviceSynchronize();
-
-        // Check if any updates occurred in this iteration
-        cudaMemcpy(&h_updated, d_updated, sizeof(int), cudaMemcpyDeviceToHost);
-
-        // If no updates, the algorithm has converged early
-        if (h_updated == 0)
-        {
-            break;
-        }
-    }
-
-    cudaFree(d_updated);
-}
-*/
 
 // ============================================================================
 // MAIN FUNCTION
@@ -407,10 +361,13 @@ int main(int argc, char **argv)
     // Process each source query sequentially
     for (int i = 0; i < S_count; ++i)
     {
+        // Get current source vertex
         int source = sources[i];
 
+        // Write source ID to output
         outfile << source << "\n";
 
+        // Run delta-stepping SSSP from this source
         run_delta_stepping_single_source(
             d_dist,
             d_offsets,
@@ -427,23 +384,10 @@ int main(int argc, char **argv)
             d_count,
             outfile);
 
-        // Run parallel Bellman-Ford for this source
-        /*
-        run_parallel_bellman_ford_single_source(
-            d_dist,
-            d_offsets,
-            d_neighs,
-            d_weights,
-            N,
-            E,
-            source);
-        */
-
-        // Copy results back to host
-
+        // Transfer computed distances from GPU to CPU
         cudaMemcpy(h_tent, d_dist, N * sizeof(int), cudaMemcpyDeviceToHost);
 
-        // Write distances for all vertices
+        // Write shortest distances for all vertices
         for (int v = 0; v < N; ++v)
         {
             outfile << h_tent[v] << "\n";
