@@ -1,0 +1,15 @@
+# state (0 unburnt, 1 burning, 2 burnt, 3 wet)
+3 1 1 0 0
+1 1 1 0 0
+1 1 1 0 0
+0 0 0 0 0
+0 0 0 0 0
+# fuel
+0 1 1 1 1
+1 1 1 1 1
+1 1 1 1 1
+1 1 1 1 1
+1 1 1 1 1
+# crews (row col water)
+0 0 0
+0 1 1
