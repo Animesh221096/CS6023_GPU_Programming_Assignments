@@ -4,192 +4,221 @@
 // See wildfire.h for the definitions you can use and the full contract of
 // run_simulation().
 #include "wildfire.h"
-#include <cuda_runtime.h>
-#include <thrust/device_vector.h>
-#include <thrust/host_vector.h>
-#include <climits>
-#include <algorithm>
 
 #define BLOCK_SIZE 256 // you can change it.
+#define MAX_BURNING 1000000
 
 // ============================================================================
 // CUDA KERNELS
 // ============================================================================
 
+// ============================================================================
+// KERNELS FOR FIRE SIMULATION
+// ============================================================================
 
-__device__ inline int idx(int r, int c, int N) { return r * N + c; }
-__device__ inline int abs_i(int x) { return x < 0 ? -x : x; }
-__device__ inline int max_i(int a, int b) { return a > b ? a : b; }
-__device__ inline int min_i(int a, int b) { return a < b ? a : b; }
-
-// Set initial fires (called once at start)
-__global__ void init_fires_kernel(int F, const int *fires, int N, uint8_t *state)
+__global__ void compute_heat_kernel(const uint8_t *state, const uint8_t *fuel,
+                                    const uint8_t *elev, int *heat_grid,
+                                    int N, int H, int dr, int dc, int W, int S, int D)
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < F)
-    {
-        int r = fires[2 * i], c = fires[2 * i + 1];
-        state[idx(r, c, N)] = BURNING;
-    }
-}
-
-// Fire spread: each thread handles one cell
-__global__ void fire_kernel(int N, int H, int dr, int dc, int W, int S, int D, int I,
-                            const uint8_t *old_state, const uint8_t *fuel,
-                            const uint8_t *elev, const uint8_t *station_map,
-                            uint8_t *new_state, uint8_t *new_fuel)
-{
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= N * N)
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N * N)
         return;
 
-    int r = tid / N, c = tid % N;
-    uint8_t st = old_state[tid];
-    uint8_t fu = fuel[tid];
-    uint8_t el = elev[tid];
-    bool sta = (station_map[tid] == 1);
-
-    // Compute heat from all burning neighbors in 5x5 window
+    int r = idx / N;
+    int c = idx % N;
     int heat = 0;
-    for (int dsr = -2; dsr <= 2; dsr++)
+
+    // Check all cells in 5x5 neighbourhood
+    for (int rs = r - 2; rs <= r + 2; rs++)
     {
-        for (int dsc = -2; dsc <= 2; dsc++)
+        for (int cs = c - 2; cs <= c + 2; cs++)
         {
-            if (dsr == 0 && dsc == 0)
+            if (rs < 0 || rs >= N || cs < 0 || cs >= N)
                 continue;
-            int sr = r + dsr, sc = c + dsc;
-            if (sr < 0 || sr >= N || sc < 0 || sc >= N)
-                continue;
-            int sid = idx(sr, sc, N);
-            if (old_state[sid] != BURNING)
+            if (rs == r && cs == c)
                 continue;
 
-            int or_ = -dsr, oc_ = -dsc; // relative pos from source
-            int a = H, b = 1;
+            int src_idx = rs * N + cs;
+            if (state[src_idx] != BURNING)
+                continue;
+
+            int a = H;
+            int b = 1;
 
             // Wind effect
-            if ((or_ == dr && oc_ == dc) || (or_ == 2 * dr && oc_ == 2 * dc))
-                a *= W;
-            else if ((or_ == -dr && oc_ == -dc) || (or_ == -2 * dr && oc_ == -2 * dc))
-                b *= W;
+            int or_ = r - rs;
+            int oc = c - cs;
+            if ((or_ == dr && oc == dc) || (or_ == 2 * dr && oc == 2 * dc))
+            {
+                a = a * W;
+            }
+            else if ((or_ == -dr && oc == -dc) || (or_ == -2 * dr && oc == -2 * dc))
+            {
+                b = b * W;
+            }
 
             // Slope effect
-            int delta = el - elev[sid];
+            int delta = (int)elev[idx] - (int)elev[src_idx];
             if (delta > D)
-                a *= S;
+            {
+                a = a * S;
+            }
             else if (delta < -D)
-                b *= S;
+            {
+                b = b * S;
+            }
 
-            heat += a / b;
+            heat += (a / b);
         }
     }
 
-    // Update state and fuel
-    uint8_t nst = st, nfu = fu;
-    if (st == BURNING)
-    {
-        nfu = max_i(0, (int)fu - 1);
-        if (nfu == 0)
-            nst = BURNT;
-    }
-    else if (st == UNBURNT && !sta && fu > 0 && heat >= I)
-    {
-        nst = BURNING;
-    }
-
-    new_state[tid] = nst;
-    new_fuel[tid] = nfu;
+    heat_grid[idx] = heat;
 }
 
-// Each crew finds closest target and moves
-__global__ void crew_kernel(int N, int R, int X, int C, int *crews,
-                            const uint8_t *old_state, const int *stations, int K,
-                            const int *burning_list, int num_burning,
-                            uint8_t *extinguish)
+__global__ void update_fire_kernel(uint8_t *state, uint8_t *fuel, const int *heat_grid,
+                                   int N, int I, const int *stations, int K)
 {
-    int cid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (cid >= C)
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N * N)
         return;
 
-    int off = cid * 3;
-    int cr = crews[off], cc = crews[off + 1], cw = crews[off + 2];
+    int r = idx / N;
+    int c = idx % N;
 
-    int tr = -1, tc = -1, bdist = INT_MAX;
-
-    if (cw > 0)
+    // Check if this is a fire station
+    bool is_station = false;
+    for (int i = 0; i < K; i++)
     {
-        // Find closest burning cell
-        if (num_burning > 0)
+        if (stations[2 * i] == r && stations[2 * i + 1] == c)
         {
-            for (int i = 0; i < num_burning; i++)
+            is_station = true;
+            break;
+        }
+    }
+
+    // Ignite unburnt cells
+    if (state[idx] == UNBURNT && fuel[idx] > 0 && !is_station && heat_grid[idx] >= I)
+    {
+        state[idx] = BURNING;
+    }
+
+    // Burn existing burning cells
+    if (state[idx] == BURNING)
+    {
+        fuel[idx]--;
+        if (fuel[idx] == 0)
+        {
+            state[idx] = BURNT;
+        }
+    }
+}
+
+// ============================================================================
+// CREW MOVEMENT AND FIREFIGHTING
+// ============================================================================
+
+__device__ int distance_between(int r1, int c1, int r2, int c2, int R)
+{
+    int dr = abs(r1 - r2);
+    int dc = abs(c1 - c2);
+    int max_d = (dr > dc) ? dr : dc;
+    return (max_d + R - 1) / R; // Ceiling division
+}
+
+__device__ void walk_towards(int *r, int *c, int tr, int tc, int R)
+{
+    int dr = tr - *r;
+    int dc = tc - *c;
+
+    if (dr > 0)
+        *r += (R < dr) ? R : dr;
+    else if (dr < 0)
+        *r -= (R < -dr) ? R : -dr;
+
+    if (dc > 0)
+        *c += (R < dc) ? R : dc;
+    else if (dc < 0)
+        *c -= (R < -dc) ? R : -dc;
+}
+
+__global__ void move_crews_kernel(int *crews, const uint8_t *state, uint8_t *new_state,
+                                  int N, int C, int R, int X,
+                                  const int *stations, int K)
+{
+    int crew_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (crew_id >= C)
+        return;
+
+    int r = crews[3 * crew_id];
+    int c = crews[3 * crew_id + 1];
+    int w = crews[3 * crew_id + 2];
+
+    // Find closest burning cell
+    int closest_r = -1, closest_c = -1, closest_dist = INT_MAX;
+
+    if (w > 0)
+    {
+        for (int i = 0; i < N * N; i++)
+        {
+            if (state[i] == BURNING)
             {
-                int br = burning_list[2 * i], bc = burning_list[2 * i + 1];
-                int d = max_i(abs_i(br - cr), abs_i(bc - cc));
-                int steps = (d + R - 1) / R; // ceil division
-                if (steps < bdist || (steps == bdist && (br < tr || (br == tr && bc < tc))))
+                int tr = i / N;
+                int tc = i % N;
+                int d = distance_between(r, c, tr, tc, R);
+                if (d < closest_dist || (d == closest_dist && (tr < closest_r || (tr == closest_r && tc < closest_c))))
                 {
-                    bdist = steps;
-                    tr = br;
-                    tc = bc;
+                    closest_dist = d;
+                    closest_r = tr;
+                    closest_c = tc;
                 }
             }
         }
     }
-    else if (cw == 0 && K > 0)
+    else
     {
-        // Find closest station
+        // Find closest fire station
         for (int i = 0; i < K; i++)
         {
-            int sr = stations[2 * i], sc = stations[2 * i + 1];
-            int d = max_i(abs_i(sr - cr), abs_i(sc - cc));
-            int steps = (d + R - 1) / R;
-            if (steps < bdist || (steps == bdist && (sr < tr || (sr == tr && sc < tc))))
+            int sr = stations[2 * i];
+            int sc = stations[2 * i + 1];
+            int d = distance_between(r, c, sr, sc, R);
+            if (d < closest_dist || (d == closest_dist && (sr < closest_r || (sr == closest_r && sc < closest_c))))
             {
-                bdist = steps;
-                tr = sr;
-                tc = sc;
+                closest_dist = d;
+                closest_r = sr;
+                closest_c = sc;
             }
         }
     }
 
     // Move towards target
-    int nr = cr, nc = cc;
-    if (tr >= 0)
+    if (closest_r != -1)
     {
-        int dr_ = tr - cr, dc_ = tc - cc;
-        int mr = dr_ > 0 ? min_i(R, dr_) : max_i(-R, dr_);
-        int mc = dc_ > 0 ? min_i(R, dc_) : max_i(-R, dc_);
-        nr = cr + mr;
-        nc = cc + mc;
+        walk_towards(&r, &c, closest_r, closest_c, R);
     }
 
-    // Check if at fire station
-    bool is_sta = false;
+    // Put out fire or refill
+    int cell_idx = r * N + c;
+    if (state[cell_idx] == BURNING && w > 0)
+    {
+        new_state[cell_idx] = WET;
+        w--;
+    }
+
+    // Check if on fire station
     for (int i = 0; i < K; i++)
     {
-        if (stations[2 * i] == nr && stations[2 * i + 1] == nc)
+        if (stations[2 * i] == r && stations[2 * i + 1] == c)
         {
-            is_sta = true;
+            w = X;
             break;
         }
     }
 
-    // Put out fire or refill
-    int nw = cw;
-    int nidx = nr * N + nc;
-    if (old_state[nidx] == BURNING && cw > 0)
-    {
-        extinguish[nidx] = 1;
-        nw -= 1;
-    }
-    if (is_sta)
-        nw = X;
-
-    crews[off] = nr;
-    crews[off + 1] = nc;
-    crews[off + 2] = nw;
+    crews[3 * crew_id] = r;
+    crews[3 * crew_id + 1] = c;
+    crews[3 * crew_id + 2] = w;
 }
-
 
 // ============================================================================
 // SIMULATION DRIVER
@@ -199,117 +228,73 @@ void run_simulation(Params p, uint8_t *state, uint8_t *fuel, const uint8_t *elev
                     int F, const int *fires, int K, const int *stations,
                     int C, int *crews)
 {
-    int N = p.N, cells = N * N;
-    size_t cells_bytes = (size_t)cells;
-    size_t crews_bytes = (size_t)C * 3 * sizeof(int);
+    int N = p.N;
+    int T = p.T;
+    size_t grid_size = (size_t)N * N;
 
-    // Device memory allocation using Thrust - use uint8_t instead of bool
-    thrust::device_vector<uint8_t> d_state(state, state + cells);
-    thrust::device_vector<uint8_t> d_new_state(cells);
-    thrust::device_vector<uint8_t> d_fuel(fuel, fuel + cells);
-    thrust::device_vector<uint8_t> d_new_fuel(cells);
-    thrust::device_vector<uint8_t> d_elev(elev, elev + cells);
-    thrust::device_vector<uint8_t> d_station(cells, 0); // Changed from bool to uint8_t
-    thrust::device_vector<uint8_t> d_extinguish(cells, 0);
-    thrust::device_vector<int> d_fires(F * 2);
-    thrust::device_vector<int> d_stations(K * 2);
-    thrust::device_vector<int> d_crews(C * 3);
-
-    // Copy input data to device
-    if (F > 0)
+    // Initialize fires
+    for (int i = 0; i < F; i++)
     {
-        cudaMemcpy(d_fires.data().get(), fires, F * 2 * sizeof(int), cudaMemcpyHostToDevice);
-    }
-    if (K > 0)
-    {
-        cudaMemcpy(d_stations.data().get(), stations, K * 2 * sizeof(int), cudaMemcpyHostToDevice);
-    }
-    if (C > 0)
-    {
-        cudaMemcpy(d_crews.data().get(), crews, crews_bytes, cudaMemcpyHostToDevice);
+        int r = fires[2 * i];
+        int c = fires[2 * i + 1];
+        state[r * N + c] = BURNING;
     }
 
-    // Build station map
-    thrust::host_vector<uint8_t> h_station(cells, 0);
-    for (int i = 0; i < K; i++)
-    {
-        int r = stations[2 * i], c = stations[2 * i + 1];
-        h_station[r * N + c] = 1;
-    }
-    cudaMemcpy(thrust::raw_pointer_cast(d_station.data()), h_station.data(), cells_bytes, cudaMemcpyHostToDevice);
-    // cudaMemcpy(d_station.data().get(), h_station.data().get(), cells_bytes, cudaMemcpyHostToDevice);
+    // Allocate device memory
+    uint8_t *d_state, *d_fuel, *d_elev, *d_new_state;
+    int *d_heat, *d_stations, *d_crews;
 
-    // Set initial fires
-    dim3 block(BLOCK_SIZE);
-    dim3 grid((F + BLOCK_SIZE - 1) / BLOCK_SIZE);
-    init_fires_kernel<<<grid, block>>>(F, d_fires.data().get(), N, d_state.data().get());
-    cudaDeviceSynchronize();
+    cudaMalloc(&d_state, grid_size);
+    cudaMalloc(&d_fuel, grid_size);
+    cudaMalloc(&d_elev, grid_size);
+    cudaMalloc(&d_new_state, grid_size);
+    cudaMalloc(&d_heat, grid_size * sizeof(int));
+    cudaMalloc(&d_stations, K * 2 * sizeof(int));
+    cudaMalloc(&d_crews, C * 3 * sizeof(int));
+
+    // Copy to device
+    cudaMemcpy(d_state, state, grid_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_fuel, fuel, grid_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_elev, elev, grid_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_stations, stations, K * 2 * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_crews, crews, C * 3 * sizeof(int), cudaMemcpyHostToDevice);
+
+    int blocks = (N * N + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     // Main simulation loop
-    for (int step = 0; step < p.T; step++)
+    for (int step = 0; step < T; step++)
     {
-        // Collect burning cells (host scan - can be optimized later)
-        thrust::host_vector<uint8_t> h_state = d_state;
-        thrust::host_vector<int> h_burn(2 * cells);
-        int nb = 0;
-        for (int i = 0; i < cells; i++)
-        {
-            if (h_state[i] == BURNING)
-            {
-                h_burn[2 * nb] = i / N;
-                h_burn[2 * nb + 1] = i % N;
-                nb++;
-            }
-        }
-        thrust::device_vector<int> d_burn(2 * nb);
-        if (nb > 0)
-        {
-            cudaMemcpy(thrust::raw_pointer_cast(d_burn.data()), h_burn.data(), 2 * nb * sizeof(int), cudaMemcpyHostToDevice);
-        }
-        // if (nb > 0) cudaMemcpy(d_burn.data().get(), h_burn.data().get(), 2*nb*sizeof(int), cudaMemcpyHostToDevice);
-
-        // Reset extinguish flags (FIXED: use bytes, use .data().get())
-        cudaMemset(d_extinguish.data().get(), 0, cells_bytes);
-
-        // Fire kernel: compute heat and update states
-        grid = dim3((cells + BLOCK_SIZE - 1) / BLOCK_SIZE);
-        fire_kernel<<<grid, block>>>(
-            N, p.H, p.dr, p.dc, p.W, p.S, p.D, p.I,
-            d_state.data().get(), d_fuel.data().get(), d_elev.data().get(),
-            d_station.data().get(), d_new_state.data().get(), d_new_fuel.data().get());
-
-        // Crew kernel: movement and extinguishing
-        if (C > 0)
-        {
-            dim3 cblock(min(C, BLOCK_SIZE));
-            dim3 cgrid((C + cblock.x - 1) / cblock.x);
-            crew_kernel<<<cgrid, cblock>>>(
-                N, p.R, p.X, C, d_crews.data().get(),
-                d_state.data().get(), d_stations.data().get(), K,
-                nb > 0 ? d_burn.data().get() : nullptr, nb,
-                d_extinguish.data().get());
-        }
-
+        // Fire phase
+        compute_heat_kernel<<<blocks, BLOCK_SIZE>>>(d_state, d_fuel, d_elev, d_heat,
+                                                    N, p.H, p.dr, p.dc, p.W, p.S, p.D);
         cudaDeviceSynchronize();
 
-        // Apply extinguish flags (wet overrides burnt)
-        thrust::host_vector<uint8_t> h_new = d_new_state;
-        thrust::host_vector<uint8_t> h_ex = d_extinguish;
-        for (int i = 0; i < cells; i++)
-        {
-            if (h_ex[i] == 1)
-                h_new[i] = WET;
-        }
-        cudaMemcpy(thrust::raw_pointer_cast(d_state.data()), h_new.data(), cells_bytes, cudaMemcpyHostToDevice);
-        // cudaMemcpy(d_state.data().get(), h_new.data().get(), cells_bytes, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_fuel.data().get(), d_new_fuel.data().get(), cells_bytes, cudaMemcpyDeviceToHost);
+        update_fire_kernel<<<blocks, BLOCK_SIZE>>>(d_state, d_fuel, d_heat, N, p.I,
+                                                   d_stations, K);
+        cudaDeviceSynchronize();
+
+        // Crew phase
+        cudaMemcpy(d_new_state, d_state, grid_size, cudaMemcpyDeviceToDevice);
+
+        int crew_blocks = (C + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        move_crews_kernel<<<crew_blocks, BLOCK_SIZE>>>(d_crews, d_state, d_new_state,
+                                                       N, C, p.R, p.X, d_stations, K);
+        cudaDeviceSynchronize();
+
+        // Combine phase (wet wins over burnt)
+        cudaMemcpy(d_state, d_new_state, grid_size, cudaMemcpyDeviceToDevice);
     }
 
-    // Copy results back to host
-    cudaMemcpy(state, d_state.data().get(), cells_bytes, cudaMemcpyDeviceToHost);
-    cudaMemcpy(fuel, d_fuel.data().get(), cells_bytes, cudaMemcpyDeviceToHost);
-    if (C > 0)
-    {
-        cudaMemcpy(crews, d_crews.data().get(), crews_bytes, cudaMemcpyDeviceToHost);
-    }
+    // Copy results back
+    cudaMemcpy(state, d_state, grid_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(fuel, d_fuel, grid_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(crews, d_crews, C * 3 * sizeof(int), cudaMemcpyDeviceToHost);
+
+    cudaFree(d_state);
+    cudaFree(d_fuel);
+    cudaFree(d_elev);
+    cudaFree(d_new_state);
+    cudaFree(d_heat);
+    cudaFree(d_stations);
+    cudaFree(d_crews);
 }
