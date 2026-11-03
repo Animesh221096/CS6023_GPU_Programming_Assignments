@@ -4,6 +4,7 @@
 // See wildfire.h for the definitions you can use and the full contract of
 // run_simulation().
 #include "wildfire.h"
+#include <climits>
 
 #define BLOCK_SIZE 256
 
@@ -12,7 +13,6 @@
 // All fire kernels read G (grid at start of step) and write the new grid.
 // ============================================================================
 
-// FIX: reads G (snapshot), not the live state grid.
 __global__ void compute_heat_kernel(const uint8_t *G, const uint8_t *fuel,
                                     const uint8_t *elev, int *heat_grid,
                                     int N, int H, int dr, int dc, int W, int S, int D)
@@ -42,7 +42,8 @@ __global__ void compute_heat_kernel(const uint8_t *G, const uint8_t *fuel,
             int a = H;
             int b = 1;
 
-            // Wind effect
+            // Wind effect. (or_, oc) is the offset FROM the burning source
+            // (rs, cs) TO the target (r, c), matching Algorithm 1.
             int or_ = r - rs;
             int oc = c - cs;
             if ((or_ == dr && oc == dc) || (or_ == 2 * dr && oc == 2 * dc))
@@ -72,10 +73,6 @@ __global__ void compute_heat_kernel(const uint8_t *G, const uint8_t *fuel,
     heat_grid[idx] = heat;
 }
 
-// FIX: fully recomputes the new state from G. A burning-in-G cell loses 1
-// fuel and becomes BURNT if it hits 0 (the crew phase may still overwrite
-// it with WET afterwards, since wet wins over burnt). Stations are kept
-// unburnt defensively.
 __global__ void update_fire_kernel(const uint8_t *G, uint8_t *state, uint8_t *fuel,
                                    const int *heat_grid, int N, int I,
                                    const int *stations, int K)
@@ -88,7 +85,7 @@ __global__ void update_fire_kernel(const uint8_t *G, uint8_t *state, uint8_t *fu
     int c = idx % N;
     uint8_t gs = G[idx];
 
-    // Check if this is a fire station (defensive; stations never ignite)
+    // Check if this is a fire station (stations never ignite)
     bool is_station = false;
     for (int i = 0; i < K; i++)
     {
@@ -114,22 +111,27 @@ __global__ void update_fire_kernel(const uint8_t *G, uint8_t *state, uint8_t *fu
     }
     else
     {
-        // Unchanged: stays UNBURT, BURNT, WET, or station cell
+        // Unchanged: stays UNBURNT, BURNT, WET, or station cell
         state[idx] = gs;
     }
 }
 
 // ============================================================================
 // CREW MOVEMENT AND FIREFIGHTING
-// FIX: everything is judged from G (grid at the start of the step), and the
-// crew writes WET straight into the post-fire state grid, so a cell that
-// burned out this step still ends up WET.
+// Everything is judged from G (grid at the start of the step), and the crew
+// writes WET straight into the post-fire state grid.
 // ============================================================================
 
 __device__ int distance_between(int r1, int c1, int r2, int c2, int R)
 {
-    int dr = abs(r1 - r2);
-    int dc = abs(c1 - c2);
+    // FIX 2: avoid abs() overload ambiguity in device code; compute the
+    // absolute differences explicitly.
+    int dr = r1 - r2;
+    int dc = c1 - c2;
+    if (dr < 0)
+        dr = -dr;
+    if (dc < 0)
+        dc = -dc;
     int max_d = (dr > dc) ? dr : dc;
     return (max_d + R - 1) / R; // Ceiling division
 }
@@ -160,10 +162,6 @@ __device__ void walk_towards(int *r, int *c, int tr, int tc, int R, int N)
         *c = N - 1;
 }
 
-// FIX: takes G (start-of-step grid) for all burning checks, and writes WET
-// into `state` (the post-fire grid). Multiple crews writing WET to the same
-// byte is a benign race (they all write the same value), and each crew
-// independently spends 1 water, as the spec requires.
 __global__ void move_crews_kernel(int *crews, const uint8_t *G, uint8_t *state,
                                   int N, int C, int R, int X,
                                   const int *stations, int K)
@@ -181,8 +179,7 @@ __global__ void move_crews_kernel(int *crews, const uint8_t *G, uint8_t *state,
 
     if (w > 0)
     {
-        // Closest burning cell, judged from G. A cell burning in G that
-        // burns out this very step is STILL a valid target.
+        // Closest burning cell, judged from G.
         for (int i = 0; i < N * N; i++)
         {
             if (G[i] == BURNING)
@@ -226,9 +223,7 @@ __global__ void move_crews_kernel(int *crews, const uint8_t *G, uint8_t *state,
         walk_towards(&r, &c, closest_r, closest_c, R, N);
     }
 
-    // Put out a fire: judged from G. Even if the cell burned out in the fire
-    // phase this step, the crew puts it out and it ends the step WET
-    // (written over whatever update_fire_kernel left there).
+    // Put out a fire: judged from G.
     int cell_idx = r * N + c;
     if (G[cell_idx] == BURNING && w > 0)
     {
@@ -236,7 +231,7 @@ __global__ void move_crews_kernel(int *crews, const uint8_t *G, uint8_t *state,
         w--;
     }
 
-    // Refill: happens whether or not the crew moved (checked after moving)
+    // Refill: checked after moving, whether or not the crew moved.
     for (int i = 0; i < K; i++)
     {
         if (stations[2 * i] == r && stations[2 * i + 1] == c)
@@ -272,9 +267,6 @@ void run_simulation(Params p, uint8_t *state, uint8_t *fuel, const uint8_t *elev
     }
 
     // Allocate device memory
-    // d_G is the snapshot of the grid at the START of each step: both the
-    // fire phase and the crews read it, so they never see each other's
-    // changes within one step.
     uint8_t *d_state, *d_G, *d_fuel, *d_elev;
     int *d_heat, *d_stations, *d_crews;
 
@@ -327,8 +319,6 @@ void run_simulation(Params p, uint8_t *state, uint8_t *fuel, const uint8_t *elev
                                                            d_stations, K);
             cudaDeviceSynchronize();
         }
-        // No combine copy needed: crews already wrote WET into the post-fire
-        // grid, so wet wins over burnt automatically.
     }
 
     // Copy results back
